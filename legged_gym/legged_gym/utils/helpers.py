@@ -33,6 +33,7 @@ import copy
 import torch
 import numpy as np
 import random
+import datetime
 from isaacgym import gymapi
 from isaacgym import gymutil
 import argparse
@@ -233,6 +234,14 @@ def get_args():
     args.sim_device = args.sim_device_type
     if args.sim_device=='cuda':
         args.sim_device += f":{args.sim_device_id}"
+
+    # default exptid
+    if not args.exptid:
+        current_time = datetime.datetime.now().strftime("%b-%d_%H_%M")
+        args.exptid = f"{current_time}-{args.task}" # e.g: Oct-10_10_47-go2
+        if args.use_camera:
+            args.exptid += "-distill"
+
     return args
 
 def export_policy_as_jit(actor_critic, path, name):
