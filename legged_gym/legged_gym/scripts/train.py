@@ -31,6 +31,7 @@
 import numpy as np
 import os
 from datetime import datetime
+import faulthandler
 
 import isaacgym
 from legged_gym.envs import *
@@ -40,7 +41,7 @@ import torch
 import wandb
 
 def train(args):
-    args.headless = True
+    # args.headless = True
     log_pth = LEGGED_GYM_ROOT_DIR + "/logs/{}/".format(args.proj_name) + args.exptid
     try:
         os.makedirs(log_pth)
@@ -56,7 +57,7 @@ def train(args):
     
     if args.no_wandb:
         mode = "disabled"
-    wandb.init(project=args.proj_name, name=args.exptid, entity="parkour", group=args.exptid[:3], mode=mode, dir="../../logs")
+    wandb.init(project=args.proj_name, name=args.exptid, entity="parkour", group=args.exptid[:3], mode=mode, dir=os.path.join(LEGGED_GYM_ROOT_DIR, "logs"))
     wandb.save(LEGGED_GYM_ENVS_DIR + "/base/legged_robot_config.py", policy="now")
     wandb.save(LEGGED_GYM_ENVS_DIR + "/base/legged_robot.py", policy="now")
 
@@ -65,6 +66,7 @@ def train(args):
     ppo_runner.learn(num_learning_iterations=train_cfg.runner.max_iterations, init_at_random_ep_len=True)
 
 if __name__ == '__main__':
+    faulthandler.enable()
     # Log configs immediately
     args = get_args()
     train(args)
