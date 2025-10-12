@@ -278,9 +278,9 @@ class OnPolicyRunner:
                     num_obs_now = self.env.cfg.env.n_proprio + self.env.cfg.env.n_scan + self.env.cfg.env.n_priv + self.env.cfg.env.n_priv_latent # 53 + 132 + 9 + 29 = 223
                     for i in range(self.env.cfg.env.history_len):
                         # mask feet_conflict in history proprio
-                        start = num_obs_now + i * self.env.cfg.env.n_proprio + self.env.cfg.env.n_proprio-4
-                        end = num_obs_now + i * self.env.cfg.env.n_proprio + self.env.cfg.env.n_proprio
-                        feet_mask[start:end] = False
+                        index_start = num_obs_now + i * self.env.cfg.env.n_proprio + self.env.cfg.env.n_proprio-4
+                        index_end = num_obs_now + i * self.env.cfg.env.n_proprio + self.env.cfg.env.n_proprio
+                        feet_mask[index_start:index_end] = False
                     obs_student[:, ~feet_mask] = 0.0
                 # obs_student[:, 6:8] = yaw.detach()
                 obs_student[infos["delta_yaw_ok"], 6:8] = yaw.detach()[infos["delta_yaw_ok"]]
