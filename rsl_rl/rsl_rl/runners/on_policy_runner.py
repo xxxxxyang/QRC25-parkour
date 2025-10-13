@@ -251,6 +251,11 @@ class OnPolicyRunner:
                         scandots_latent = self.alg.actor_critic.actor.infer_scandots_latent(obs)
                     scandots_latent_buffer.append(scandots_latent)
                     obs_prop_depth = obs[:, :self.env.cfg.env.n_proprio].clone()
+                    if 'go2' in self.cfg["experiment_name"]:
+                        # For go2 mask the info about feet
+                        n_proprio = int(self.env.cfg.env.n_proprio)
+                        feet_len = 4
+                        obs_prop_depth[:, n_proprio-feet_len : n_proprio] = 0
                     obs_prop_depth[:, 6:8] = 0
                     depth_latent_and_yaw = self.alg.depth_encoder(infos["depth"].clone(), obs_prop_depth)  # clone is crucial to avoid in-place operation
                     
@@ -266,6 +271,17 @@ class OnPolicyRunner:
                     actions_teacher_buffer.append(actions_teacher)
 
                 obs_student = obs.clone()
+                if 'go2' in self.cfg["experiment_name"]:
+                    # For go2 mask the info about feet
+                    feet_mask = torch.ones(self.env.cfg.env.num_observations, dtype=torch.bool)
+                    feet_mask[self.env.cfg.env.n_proprio-4 : self.env.cfg.env.n_proprio] = False # feet: 4
+                    num_obs_now = self.env.cfg.env.n_proprio + self.env.cfg.env.n_scan + self.env.cfg.env.n_priv + self.env.cfg.env.n_priv_latent # 53 + 132 + 9 + 29 = 223
+                    for i in range(self.env.cfg.env.history_len):
+                        # mask feet_conflict in history proprio
+                        index_start = num_obs_now + i * self.env.cfg.env.n_proprio + self.env.cfg.env.n_proprio-4
+                        index_end = num_obs_now + i * self.env.cfg.env.n_proprio + self.env.cfg.env.n_proprio
+                        feet_mask[index_start:index_end] = False
+                    obs_student[:, ~feet_mask] = 0.0
                 # obs_student[:, 6:8] = yaw.detach()
                 obs_student[infos["delta_yaw_ok"], 6:8] = yaw.detach()[infos["delta_yaw_ok"]]
                 delta_yaw_ok_buffer.append(torch.nonzero(infos["delta_yaw_ok"]).size(0) / infos["delta_yaw_ok"].numel())
