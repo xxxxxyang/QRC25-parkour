@@ -35,8 +35,8 @@ pip3 install torch==1.10.0+cu113 torchvision==0.11.1+cu113 torchaudio==0.10.0+cu
 pip3 install torch torchvision torchaudio -f https://download.pytorch.org/whl/cu121
 
 # Clone this repository
-git clone git@github.com:<your-username>/extreme-parkour.git
-cd extreme-parkour
+git clone git@github.com:xxxxxyang/QRC25-parkour.git parkour
+cd parkour
 
 # Download Isaac Gym binaries from NVIDIA Developer:
 # https://developer.nvidia.com/isaac-gym
@@ -46,8 +46,8 @@ cd extreme-parkour
 cd isaacgym/python && pip install -e .
 
 # Install local packages
-cd ~/extreme-parkour/rsl_rl && pip install -e .
-cd ~/extreme-parkour/legged_gym && pip install -e .
+cd ~/parkour/rsl_rl && pip install -e .
+cd ~/parkour/legged_gym && pip install -e .
 
 # Install other dependencies
 pip install "numpy<1.24" pydelatin wandb tqdm opencv-python ipdb pyfqmr flask scikit-learn
