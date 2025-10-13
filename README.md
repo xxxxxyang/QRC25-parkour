@@ -53,9 +53,9 @@ cd ~/extreme-parkour/legged_gym && pip install -e .
 pip install "numpy<1.24" pydelatin wandb tqdm opencv-python ipdb pyfqmr flask scikit-learn
 ```
 
-<!-- tips: If you find error like `libGL.so.1: cannot open shared object file`, try:
+<!-- tips: If you find error like `libstdc++.so.6`: 
 ```bash
-export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libGL.so.1
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 ``` -->
 
 ---
@@ -71,7 +71,7 @@ cd legged_gym/scripts
 ### 1. Train a base policy
 
 ```bash
-python train.py --exptid <exptid_name> --device cuda:0 --task go2
+python train.py --exptid <exptid_name> --device cuda:0 --task go2 --headless
 ```
 
 * Recommended: 10–15k iterations (~8–10 hours on RTX 3090)
@@ -81,8 +81,7 @@ python train.py --exptid <exptid_name> --device cuda:0 --task go2
 ### 2. Train a distillation policy
 
 ```bash
-python train.py --exptid <distill_exptid_name> --device cuda:0 \
-    --resume --resumeid <your_base_exptid> --delay --use_camera
+python train.py --exptid <distill_exptid_name> --device cuda:0 --resume --resumeid <your_base_exptid> --delay --use_camera --headless
 ```
 
 * Recommended: 5–10k iterations (~5–10 hours on RTX 3090)
