@@ -10,6 +10,8 @@ import argparse
 import code
 import shutil
 
+from legged_gym import LEGGED_GYM_ROOT_DIR
+
 def get_load_path(root, load_run=-1, checkpoint=-1, model_name_include="model"):
     if not os.path.isdir(root):  # use first 4 chars to mactch the run name
         model_name_cand = os.path.basename(root)
@@ -67,7 +69,8 @@ class HardwareVisionNN(nn.Module):
         # return obs, depth_latent
 
 def play(args):    
-    load_run = "../../logs/parkour_new/" + args.exptid
+    # load_run = "../../logs/parkour_new/" + args.exptid
+    load_run = os.path.join(LEGGED_GYM_ROOT_DIR, "logs", args.proj_name, args.exptid)
     checkpoint = args.checkpoint
 
     n_priv_explicit = 3 + 3 + 3
@@ -119,6 +122,7 @@ if __name__ == '__main__':
     parser.add_argument('--exptid', type=str)
     parser.add_argument('--checkpoint', type=int, default=-1)
     parser.add_argument('--tanh', action='store_true')
+    parser.add_argument('--proj_name', type=str, default="ICRDoge")
     args = parser.parse_args()
     play(args)
     
