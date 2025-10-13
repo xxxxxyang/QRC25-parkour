@@ -1,91 +1,181 @@
-# Extreme Parkour with Legged Robots #
+# Extreme Parkour with Legged Robots (Modified Fork)
+
 <p align="center">
 <img src="./images/teaser.jpeg" width="80%"/>
 </p>
 
-**Authors**: [Xuxin Cheng*](https://chengxuxin.github.io/), [Kexin Shi*](https://tenhearts.github.io/), [Ananye Agarwal](https://anag.me/), [Deepak Pathak](https://www.cs.cmu.edu/~dpathak/)  
-**Website**: https://extreme-parkour.github.io  
-**Paper**: https://arxiv.org/abs/2309.14341  
-**Tweet Summary**: https://twitter.com/pathak2206/status/1706696237703901439
+>  **This repository is a modified fork of [chengxuxin/etreme-parkour](https://github.com/chengxuxin/extreme-parkour).**  
+> The goal of this fork is to improve clarity, compatibility, and usability for research and experimentation.
 
-### Installation ###
+---
+
+## Modifications in This Fork
+
+This fork introduces several improvements and updates:
+- Updated installation instructions for **CUDA 12 / RTX 40xx GPUs**
+- Added Robot **unitree go2** for training
+- Clarified usage examples for training and playing policies
+- Improved documentation readability and structure
+
+---
+
+## Installation
+
 ```bash
+# Create a new conda environment
 conda create -n parkour python=3.8
 conda activate parkour
-cd
-pip3 install torch==1.10.0+cu113 torchvision==0.11.1+cu113 torchaudio==0.10.0+cu113 -f https://download.pytorch.org/whl/cu113/torch_stable.html # older than nvidia 30xx
-pip3 install torch torchvision torchaudio -f https://download.pytorch.org/whl/cu121 # 40xx
-git clone git@github.com:chengxuxin/extreme-parkour.git
+
+# Install PyTorch depending on your GPU type
+
+# For older GPUs (e.g., NVIDIA 30xx series)
+pip3 install torch==1.10.0+cu113 torchvision==0.11.1+cu113 torchaudio==0.10.0+cu113 -f https://download.pytorch.org/whl/cu113/torch_stable.html
+
+# For newer GPUs (CUDA 12.1 / 40xx series)
+pip3 install torch torchvision torchaudio -f https://download.pytorch.org/whl/cu121
+
+# Clone this repository
+git clone git@github.com:<your-username>/extreme-parkour.git
 cd extreme-parkour
-# Download the Isaac Gym binaries from https://developer.nvidia.com/isaac-gym 
-# Originally trained with Preview3, but haven't seen bugs using Preview4.
+
+# Download Isaac Gym binaries from NVIDIA Developer:
+# https://developer.nvidia.com/isaac-gym
+# Originally trained with Preview 3, but Preview 4 also works fine.
+
+# Install Isaac Gym
 cd isaacgym/python && pip install -e .
+
+# Install local packages
 cd ~/extreme-parkour/rsl_rl && pip install -e .
 cd ~/extreme-parkour/legged_gym && pip install -e .
+
+# Install other dependencies
 pip install "numpy<1.24" pydelatin wandb tqdm opencv-python ipdb pyfqmr flask scikit-learn
 ```
 
-### Usage ###
-`cd legged_gym/scripts`
-1. Train base policy:  
+<!-- tips: If you find error like `libGL.so.1: cannot open shared object file`, try:
 ```bash
-python train.py --exptid xxx-xx-WHATEVER --device cuda:0
-```
-Train 10-15k iterations (8-10 hours on 3090) (at least 15k recommended).
+export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libGL.so.1
+``` -->
 
-2. Train distillation policy:
+---
+
+## Usage
+
+Change directory to scripts:
+
 ```bash
-python train.py --exptid yyy-yy-WHATEVER --device cuda:0 --resume --resumeid xxx-xx --delay --use_camera
+cd legged_gym/scripts
 ```
-Train 5-10k iterations (5-10 hours on 3090) (at least 5k recommended). 
->You can run either base or distillation policy at arbitary gpu # as long as you set `--device cuda:#`, no need to set `CUDA_VISIBLE_DEVICES`.
 
-3. Play base policy:
+### 1. Train a base policy
+
 ```bash
-python play.py --exptid xxx-xx
+python train.py --exptid <exptid_name> --device cuda:0 --task go2
 ```
-No need to write the full exptid. The parser will auto match runs with first 6 strings (xxx-xx). So better make sure you don't reuse xxx-xx. Delay is added after 8k iters. If you want to play after 8k, add `--delay`
 
-4. Play distillation policy:
+* Recommended: 10–15k iterations (~8–10 hours on RTX 3090)
+* If `--exptid` is not provided, a default one will be generated (e.g., `Oct-09_19_31-go2`).
+* Available tasks: `a1`, `go2`, `climb_go2`, `leap_go2`
+
+### 2. Train a distillation policy
+
 ```bash
-python play.py --exptid yyy-yy --delay --use_camera
+python train.py --exptid <distill_exptid_name> --device cuda:0 \
+    --resume --resumeid <your_base_exptid> --delay --use_camera
 ```
 
-5. Save models for deployment:
+* Recommended: 5–10k iterations (~5–10 hours on RTX 3090)
+* You can use any available GPU by setting `--device cuda:#`
+* Default name: `Oct-10_22_46-go2-distill`
+
+### 3. Play base policy
+
 ```bash
-python save_jit.py --exptid xxx-xx
+python play.py --exptid <your_base_exptid_name>
 ```
-This will save the models in `legged_gym/logs/parkour_new/xxx-xx/traced/`.
 
-### Viewer Usage
-Can be used in both IsaacGym and web viewer.
-- `ALT + Mouse Left + Drag Mouse`: move view.
-- `[ ]`: switch to next/prev robot.
-- `Space`: pause/unpause.
-- `F`: switch between free camera and following camera.
+If you trained beyond 8k iterations, you may need to add `--delay`.
 
-### Arguments
-- --exptid: string, can be `xxx-xx-WHATEVER`, `xxx-xx` is typically numbers only. `WHATEVER` is the description of the run. 
-- --device: can be `cuda:0`, `cpu`, etc.
-- --delay: whether add delay or not.
-- --checkpoint: the specific checkpoint you want to load. If not specified load the latest one.
-- --resume: resume from another checkpoint, used together with `--resumeid`.
-- --seed: random seed.
-- --no_wandb: no wandb logging.
-- --use_camera: use camera or scandots.
-- --web: used for playing on headless machines. It will forward a port with vscode and you can visualize seemlessly in vscode with your idle gpu or cpu. [Live Preview](https://marketplace.visualstudio.com/items?itemName=ms-vscode.live-server) vscode extension required, otherwise you can view it in any browser.
+### 4. Play distillation policy
 
-### Acknowledgement
-https://github.com/leggedrobotics/legged_gym  
-https://github.com/Toni-SM/skrl
-
-### Citation
-If you found any part of this code useful, please consider citing:
+```bash
+python play.py --exptid <your_distill_exptid_name> --delay --use_camera
 ```
+
+
+### 5. Export trained models for deployment
+
+```bash
+python save_jit.py --exptid <your_exptid_name>
+```
+
+Traced models will be saved in:
+
+```bash
+legged_gym/logs/<proj_name>/<exptid>/traced/
+```
+
+---
+
+## Viewer Controls
+
+Can be used in both Isaac Gym and the web viewer.
+
+| Action               | Key                       |
+| -------------------- | ------------------------- |
+| Move camera          | `ALT + Left Mouse + Drag` |
+| Switch robot         | `[` or `]`                |
+| Pause / Resume       | `Space`                   |
+| Toggle follow camera | `F`                       |
+
+---
+
+## Command-Line Arguments
+
+| Argument       | Description                                                                 |
+| -------------- | --------------------------------------------------------------------------- |
+| `--exptid`     | Experiment ID (default auto-generated)                                      |
+| `--device`     | Device to use (e.g., `cuda:0`, `cpu`)                                       |
+| `--delay`      | Whether to add perception delay                                             |
+| `--checkpoint` | Specific checkpoint to load (default: latest)                               |
+| `--resume`     | Resume from another checkpoint                                              |
+| `--resumeid`   | Experiment ID to resume from                                                |
+| `--seed`       | Random seed                                                                 |
+| `--no_wandb`   | Disable Weights & Biases logging                                            |
+| `--use_camera` | Enable camera or scan dots                                                  |
+| `--web`        | Enable headless web visualization (requires VSCode Live Preview or browser) |
+
+---
+
+## 🙏 Acknowledgements
+
+This repository builds upon and extends the following projects:
+
+* [Extreme Parkour with Legged Robots (Cheng et al., 2023)](https://github.com/chengxuxin/extreme-parkour)
+* [leggedrobotics/legged_gym](https://github.com/leggedrobotics/legged_gym)
+* [Toni-SM/skrl](https://github.com/Toni-SM/skrl)
+
+---
+
+## Citation
+
+If you find this project useful, please cite the original paper:
+
+```bibtex
 @article{cheng2023parkour,
-title={Extreme Parkour with Legged Robots},
-author={Cheng, Xuxin and Shi, Kexin and Agarwal, Ananye and Pathak, Deepak},
-journal={arXiv preprint arXiv:2309.14341},
-year={2023}
+  title={Extreme Parkour with Legged Robots},
+  author={Cheng, Xuxin and Shi, Kexin and Agarwal, Ananye and Pathak, Deepak},
+  journal={arXiv preprint arXiv:2309.14341},
+  year={2023}
 }
 ```
+
+---
+
+## License
+
+This repository retains the same license as the original project (e.g., MIT License).
+Modifications in this fork © 2025 JiaHe Yang
+Original work © 2023 Xuxin Cheng, Kexin Shi, Ananye Agarwal, and Deepak Pathak.
+

@@ -67,32 +67,33 @@ def play(args):
     # override some parameters for testing
     if args.nodelay:
         env_cfg.domain_rand.action_delay_view = 0
-    env_cfg.env.num_envs = 16 if not args.save else 64
+    if args.num_envs > 16:
+        env_cfg.env.num_envs = 16 if not args.save else 64
     env_cfg.env.episode_length_s = 60
     env_cfg.commands.resampling_time = 60
     env_cfg.terrain.num_rows = 5
     env_cfg.terrain.num_cols = 5
     env_cfg.terrain.height = [0.02, 0.02]
     env_cfg.terrain.terrain_dict = {"smooth slope": 0., 
-                                    "rough slope up": 0.0,
-                                    "rough slope down": 0.0,
+                                    "rough slope up": 0.,
+                                    "rough slope down": 0.,
                                     "rough stairs up": 0., 
                                     "rough stairs down": 0., 
                                     "discrete": 0., 
-                                    "stepping stones": 0.0,
+                                    "stepping stones": 0.,
                                     "gaps": 0., 
                                     "smooth flat": 0,
-                                    "pit": 0.0,
-                                    "wall": 0.0,
+                                    "pit": 0.,
+                                    "wall": 0.,
                                     "platform": 0.,
                                     "large stairs up": 0.,
                                     "large stairs down": 0.,
-                                    "parkour": 0.2,
-                                    "parkour_hurdle": 0.2,
+                                    "parkour": 0.,
+                                    "parkour_hurdle": 0.,
                                     "parkour_flat": 0.,
-                                    "parkour_step": 0.2,
+                                    "parkour_step": 0.,
                                     "parkour_gap": 0.2, 
-                                    "demo": 0.2}
+                                    "demo": 0.}
     
     env_cfg.terrain.terrain_proportions = list(env_cfg.terrain.terrain_dict.values())
     env_cfg.terrain.curriculum = False
