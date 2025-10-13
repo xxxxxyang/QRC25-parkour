@@ -60,7 +60,8 @@ def play(args):
         web_viewer = webviewer.WebViewer()
     faulthandler.enable()
     exptid = args.exptid
-    log_pth = "../../logs/{}/".format(args.proj_name) + args.exptid
+    # log_pth = "../../logs/{}/".format(args.proj_name) + args.exptid
+    log_pth = os.path.join(LEGGED_GYM_ROOT_DIR, "logs", args.proj_name, exptid)
 
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     # override some parameters for testing
