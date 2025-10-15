@@ -115,6 +115,16 @@ Traced models will be saved in:
 legged_gym/logs/<proj_name>/<exptid>/traced/
 ```
 
+### 6. Eval trained models
+
+```bash
+# base policy
+python evaluate.py --exptid <your_base_exptid_name>
+
+# distillation policy
+python evaluate.py --exptid <your_exptid_name> --delay --use_camera
+```
+
 ---
 
 ## Viewer Controls

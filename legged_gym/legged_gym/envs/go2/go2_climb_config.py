@@ -90,10 +90,10 @@ class Go2ClimbCfg( LeggedRobotCfg ):
                         "platform": 0.,
                         "large stairs up": 0.,
                         "large stairs down": 0.,
-                        "parkour": 0.25,
-                        "parkour_hurdle": 0.25,
-                        "parkour_flat": 0.25,
-                        "parkour_step": 0.25,
+                        "parkour": 0.33,
+                        "parkour_hurdle": 0.33,
+                        "parkour_flat": 0.,
+                        "parkour_step": 0.33,
                         "parkour_gap": 0.,
                         "demo": 0.,}
         terrain_proportions = list(terrain_dict.values())
