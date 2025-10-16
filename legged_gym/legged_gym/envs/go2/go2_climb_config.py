@@ -72,8 +72,19 @@ class Go2ClimbCfg( LeggedRobotCfg ):
         base_height_target = 0.25
 
     class depth( LeggedRobotCfg.depth ):
-        position = [0.32, 0.0, 0.035]  # front camera
-        angle = [-5.7, 5.7]  # positive pitch down
+        # position = [0.32, 0.0, 0.035]  # front camera
+        position = dict(
+            mean = [0.32, 0.0, 0.035],
+            std = [0.01, 0.01, 0.01]
+        )
+        rotation = dict(
+            lower = [-0.1, -0.1, -0.1],
+            upper = [0.1, 0.1, 0.1]
+        )
+        # angle = [-5.7, 5.7]  # positive pitch down
+
+        horizontal_fov = [85, 89]
+        near_plane = 0.1
 
     class terrain( LeggedRobotCfg.terrain ):
         terrain_dict = {"smooth slope": 0., 
@@ -90,10 +101,10 @@ class Go2ClimbCfg( LeggedRobotCfg ):
                         "platform": 0.,
                         "large stairs up": 0.,
                         "large stairs down": 0.,
-                        "parkour": 0.25,
-                        "parkour_hurdle": 0.25,
-                        "parkour_flat": 0.25,
-                        "parkour_step": 0.25,
+                        "parkour": 0.33,
+                        "parkour_hurdle": 0.33,
+                        "parkour_flat": 0.,
+                        "parkour_step": 0.33,
                         "parkour_gap": 0.,
                         "demo": 0.,}
         terrain_proportions = list(terrain_dict.values())
@@ -107,5 +118,5 @@ class Go2ClimbCfgPPO( LeggedRobotCfgPPO ):
         entropy_coef = 0.01
     class runner( LeggedRobotCfgPPO.runner ):
         run_name = ''
-        experiment_name = 'climb_go2'
+        experiment_name = 'climb'
 

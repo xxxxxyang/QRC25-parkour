@@ -868,22 +868,53 @@ class LeggedRobot(BaseTask):
         if self.cfg.depth.use_camera:
             config = self.cfg.depth
             camera_props = gymapi.CameraProperties()
-            camera_props.width = self.cfg.depth.original[0]
-            camera_props.height = self.cfg.depth.original[1]
+            camera_props.width = config.original[0]
+            camera_props.height = config.original[1]
             camera_props.enable_tensors = True
-            camera_horizontal_fov = self.cfg.depth.horizontal_fov 
-            camera_props.horizontal_fov = camera_horizontal_fov
+
+            if hasattr(config, "near_plane"):
+                camera_props.near_plane = config.near_plane # meters
+                print('Near plane has been set: ', camera_props.near_plane)
+
+            camera_horizontal_fov = config.horizontal_fov 
+            if isinstance(camera_horizontal_fov, (tuple, list)):
+                # fov randomization
+                camera_props.horizontal_fov = np.random.uniform(
+                    camera_horizontal_fov[0], camera_horizontal_fov[1])
+                print('Camera horizontal fov has been randomized: ', camera_horizontal_fov)
+            else:
+                camera_props.horizontal_fov = camera_horizontal_fov
 
             camera_handle = self.gym.create_camera_sensor(env_handle, camera_props)
             self.cam_handles.append(camera_handle)
             
             local_transform = gymapi.Transform()
             
-            camera_position = np.copy(config.position)
-            camera_angle = np.random.uniform(config.angle[0], config.angle[1])
-            
-            local_transform.p = gymapi.Vec3(*camera_position)
-            local_transform.r = gymapi.Quat.from_euler_zyx(0, np.radians(camera_angle), 0)
+            if isinstance(config.position, dict):
+                cam_x = np.random.normal(config.position['mean'][0], config.position['std'][0])
+                cam_y = np.random.normal(config.position['mean'][1], config.position['std'][1])
+                cam_z = np.random.normal(config.position['mean'][2], config.position['std'][2])
+                local_transform.p = gymapi.Vec3(cam_x, cam_y, cam_z)
+                print('Camera position: ', cam_x, cam_y, cam_z)
+                print('Camera position has been randomized: ', config.position)
+            else:
+                camera_position = np.copy(config.position)
+                local_transform.p = gymapi.Vec3(*camera_position)
+
+            if hasattr(config, "rotation"):
+                if isinstance(config.rotation, dict):
+                    cam_roll = np.random.uniform(0, 1) * (
+                        config.rotation["upper"][0] - config.rotation["lower"][0]) + config.rotation["lower"][0]
+                    cam_pitch = np.random.uniform(0, 1) * (
+                        config.rotation["upper"][1] - config.rotation["lower"][1]) + config.rotation["lower"][1]
+                    cam_yaw = np.random.uniform(0, 1) * (
+                        config.rotation["upper"][2] - config.rotation["lower"][2]) + config.rotation["lower"][2]
+                    local_transform.r = gymapi.Quat.from_euler_zyx(cam_roll, cam_pitch, cam_yaw)
+                    print('Camera rotation has been randomized: ', config.rotation)
+            else:
+                camera_angle = np.random.uniform(config.angle[0], config.angle[1])
+                local_transform.r = gymapi.Quat.from_euler_zyx(0, np.radians(camera_angle), 0)
+
             root_handle = self.gym.get_actor_root_rigid_body_handle(env_handle, actor_handle)
             
             self.gym.attach_camera_to_body(camera_handle, env_handle, root_handle, local_transform, gymapi.FOLLOW_TRANSFORM)
