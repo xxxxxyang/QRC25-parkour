@@ -83,7 +83,7 @@ class DepthOnlyFCBackbone58x87(nn.Module):
             nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3),
             activation,
             nn.Flatten(),
-            # [32, 25, 39]
+            # [64, 25, 39]
             nn.Linear(64 * 25 * 39, 128),
             activation,
             nn.Linear(128, scandots_output_dim)
