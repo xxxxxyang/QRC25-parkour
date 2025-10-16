@@ -72,8 +72,19 @@ class Go2ParkourCfg( LeggedRobotCfg ):
         base_height_target = 0.25
 
     class depth( LeggedRobotCfg.depth ):
-        position = [0.32, 0.0, 0.035]  # front camera
-        angle = [-5.7, 5.7]  # positive pitch down
+        # position = [0.32, 0.0, 0.035]  # front camera
+        position = dict(
+            mean = [0.32, 0.0, 0.035],
+            std = [0.01, 0.01, 0.01]
+        )
+        rotation = dict(
+            lower = [-0.1, -0.1, -0.1],
+            upper = [0.1, 0.1, 0.1]
+        )
+        # angle = [-5.7, 5.7]  # positive pitch down
+
+        horizontal_fov = [85, 89]
+        near_plane = 0.1
 
 class Go2ParkourCfgPPO( LeggedRobotCfgPPO ):
     class algorithm( LeggedRobotCfgPPO.algorithm ):
