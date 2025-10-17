@@ -58,3 +58,5 @@ from .go2.go2_climb_config import Go2ClimbCfg, Go2ClimbCfgPPO
 task_registry.register( "climb_go2", LeggedRobot, Go2ClimbCfg(), Go2ClimbCfgPPO() )
 from .go2.go2_leap_config import Go2LeapCfg, Go2LeapCfgPPO
 task_registry.register( "leap_go2", LeggedRobot, Go2LeapCfg(), Go2LeapCfgPPO() )
+from .go2.go2_flat_config import Go2FlatCfg, Go2FlatCfgPPO
+task_registry.register( "flat_go2", LeggedRobot, Go2FlatCfg(), Go2FlatCfgPPO() )

@@ -937,6 +937,7 @@ class LeggedRobot(BaseTask):
                     cam_yaw = np.random.uniform(0, 1) * (
                         config.rotation["upper"][2] - config.rotation["lower"][2]) + config.rotation["lower"][2]
                     local_transform.r = gymapi.Quat.from_euler_zyx(cam_roll, cam_pitch, cam_yaw)
+                    print('Camera rotation: ', cam_roll, cam_pitch, cam_yaw)
                     print('Camera rotation has been randomized: ', config.rotation)
             else:
                 camera_angle = np.random.uniform(config.angle[0], config.angle[1])

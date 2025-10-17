@@ -31,7 +31,7 @@
 from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
 
 
-class Go2ClimbCfg( LeggedRobotCfg ):
+class Go2FlatCfg( LeggedRobotCfg ):
     class init_state( LeggedRobotCfg.init_state ):
         pos = [0.0, 0.0, 0.42] # x,y,z [m]
         default_joint_angles = { # = target angles [rad] when action = 0.0
@@ -101,10 +101,10 @@ class Go2ClimbCfg( LeggedRobotCfg ):
                         "platform": 0.,
                         "large stairs up": 0.,
                         "large stairs down": 0.,
-                        "parkour": 0.25,
-                        "parkour_hurdle": 0.25,
-                        "parkour_flat": 0.25,
-                        "parkour_step": 0.25,
+                        "parkour": 0.,
+                        "parkour_hurdle": 0.,
+                        "parkour_flat": 1.,
+                        "parkour_step": 0.,
                         "parkour_gap": 0.,
                         "demo": 0.,}
         terrain_proportions = list(terrain_dict.values())
@@ -113,10 +113,10 @@ class Go2ClimbCfg( LeggedRobotCfg ):
         randomize_friction = True
         friction_range = [0.3, 2.0]
 
-class Go2ClimbCfgPPO( LeggedRobotCfgPPO ):
+class Go2FlatCfgPPO( LeggedRobotCfgPPO ):
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         entropy_coef = 0.01
     class runner( LeggedRobotCfgPPO.runner ):
         run_name = ''
-        experiment_name = 'climb'
+        experiment_name = 'flat'
 
