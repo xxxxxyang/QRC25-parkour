@@ -71,6 +71,29 @@ class Go2ParkourCfg( LeggedRobotCfg ):
         soft_dof_pos_limit = 0.9
         base_height_target = 0.25
 
+    class terrain( LeggedRobotCfg.terrain ):
+        terrain_dict = {"smooth slope": 0., 
+                        "rough slope up": 0.,
+                        "rough slope down": 0.,
+                        "rough stairs up": 0., 
+                        "rough stairs down": 0., 
+                        "discrete": 0., 
+                        "stepping stones": 0.,
+                        "gaps": 0., 
+                        "smooth flat": 0.,
+                        "pit": 0.,
+                        "wall": 0.,
+                        "platform": 0.,
+                        "large stairs up": 0.,
+                        "large stairs down": 0.,
+                        "parkour": 0.2,
+                        "parkour_hurdle": 0.2,
+                        "parkour_flat": 0.2,
+                        "parkour_step": 0.2,
+                        "parkour_gap": 0.2,
+                        "demo": 0.,}
+        terrain_proportions = list(terrain_dict.values())
+
     class depth( LeggedRobotCfg.depth ):
         # position = [0.32, 0.0, 0.035]  # front camera
         position = dict(
