@@ -50,7 +50,7 @@ cd ~/parkour/rsl_rl && pip install -e .
 cd ~/parkour/legged_gym && pip install -e .
 
 # Install other dependencies
-pip install "numpy<1.24" pydelatin wandb tqdm opencv-python ipdb pyfqmr flask scikit-learn
+pip install "numpy<1.24" pydelatin wandb tqdm opencv-python ipdb pyfqmr flask scikit-learn absl-py inputs
 ```
 
 <!-- tips: If you find error like `libstdc++.so.6`: 
