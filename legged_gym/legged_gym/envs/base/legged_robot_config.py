@@ -55,8 +55,9 @@ class LeggedRobotCfg(BaseConfig):
         episode_length_s = 20 # episode length in seconds
         obs_type = "og"
 
-
-        
+        # gamepad control
+        joystick_ctrl = False
+        keyboard_ctrl = False
         
         
         history_encoding = True

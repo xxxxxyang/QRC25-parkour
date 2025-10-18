@@ -46,6 +46,7 @@ from legged_gym.envs.base.base_task import BaseTask
 from legged_gym.utils.terrain import Terrain
 from legged_gym.utils.math import *
 from legged_gym.utils.helpers import class_to_dict
+from legged_gym.utils.gamepad_reader import Gamepad
 from scipy.spatial.transform import Rotation as R
 from .legged_robot_config import LeggedRobotCfg
 
@@ -107,6 +108,11 @@ class LeggedRobot(BaseTask):
         self.init_done = True
         self.global_counter = 0
         self.total_env_steps_counter = 0
+
+        if self.cfg.env.joystick_ctrl:
+            self.gamepad = Gamepad()
+            self.command_function = self.gamepad.get_command
+            print("Gamepad control enabled")
 
         self.reset_idx(torch.arange(self.num_envs, device=self.device))
         self.post_physics_step()
@@ -170,6 +176,7 @@ class LeggedRobot(BaseTask):
         depth_image = torch.clip(depth_image, -self.cfg.depth.far_clip, -self.cfg.depth.near_clip)
         depth_image = self.resize_transform(depth_image[None, :]).squeeze()
         depth_image = self.normalize_depth_image(depth_image)
+        # print("Processed Depth Image: ", depth_image)
         return depth_image
 
     def crop_depth_image(self, depth_image):
@@ -193,6 +200,7 @@ class LeggedRobot(BaseTask):
                                                                 gymapi.IMAGE_DEPTH)
             
             depth_image = gymtorch.wrap_tensor(depth_image_)
+            # print("Raw Depth Image: ", depth_image)
             depth_image = self.process_depth_image(depth_image, i)
 
             init_flag = self.episode_length_buf <= 1
@@ -278,7 +286,9 @@ class LeggedRobot(BaseTask):
             if self.cfg.depth.use_camera:
                 window_name = "Depth Image"
                 cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+                # cv2.imshow("Depth Image", (self.depth_buffer[self.lookat_id, -1].cpu().numpy() + 0.5)*0)
                 cv2.imshow("Depth Image", self.depth_buffer[self.lookat_id, -1].cpu().numpy() + 0.5)
+                # print("Depth Image: ", self.depth_buffer[self.lookat_id, -1].cpu().numpy()+0.5)
                 cv2.waitKey(1)
 
     def reindex_feet(self, vec):
@@ -385,9 +395,26 @@ class LeggedRobot(BaseTask):
         Computes observations
         """
         imu_obs = torch.stack((self.roll, self.pitch), dim=1)
-        if self.global_counter % 5 == 0:
+
+        if self.cfg.env.joystick_ctrl:
+            # use joystick(gamepad) control
+            lin_speed, ang_speed, gait_type, e_stop, _ = self.command_function()
+            if e_stop:
+                import sys
+                sys.exit(0)
+            self.commands[:, 0] = lin_speed[0]
+            self.commands[:, 1] = lin_speed[1]
+            # yaw command
+            self.delta_yaw = torch.tensor(ang_speed, device = self.device).unsqueeze(0)
+            self.delta_next_yaw = self.delta_yaw
+        elif self.cfg.env.keyboard_ctrl:
+            # use keyboard control ang_speed
+            self.delta_yaw = self.commands[:, 3]
+            self.delta_next_yaw = self.commands[:, 3]
+        elif self.global_counter % 5 == 0:
             self.delta_yaw = self.target_yaw - self.yaw
             self.delta_next_yaw = self.next_target_yaw - self.yaw
+
         obs_buf = torch.cat((#skill_vector, 
                             self.base_ang_vel  * self.obs_scales.ang_vel,   #[1,3]
                             imu_obs,    #[1,2]

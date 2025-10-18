@@ -46,6 +46,7 @@ from copy import deepcopy
 import matplotlib.pyplot as plt
 from time import time, sleep
 from legged_gym.utils import webviewer
+import argparse
 
 def get_load_path(root, load_run=-1, checkpoint=-1, model_name_include="model"):
     if checkpoint==-1:
@@ -69,6 +70,9 @@ def play(args):
         env_cfg.domain_rand.action_delay_view = 0
     if args.num_envs > 16:
         env_cfg.env.num_envs = 16 if not args.save else 64
+    # if joystick_ctrl and keyboard_ctrl both true, use joystick control
+    env_cfg.env.joystick_ctrl = args.joystick # use joystick
+    env_cfg.env.keyboard_ctrl = args.keyboard # use keyboard
     env_cfg.env.episode_length_s = 60
     env_cfg.commands.resampling_time = 60
     env_cfg.terrain.num_rows = 5
@@ -90,10 +94,10 @@ def play(args):
                                     "large stairs down": 0.,
                                     "parkour": 0.2,
                                     "parkour_hurdle": 0.2,
-                                    "parkour_flat": 0.,
+                                    "parkour_flat": 0.2,
                                     "parkour_step": 0.2,
-                                    "parkour_gap": 0.2, 
-                                    "demo": 0.2}
+                                    "parkour_gap": 0., 
+                                    "demo": 0.}
     
     env_cfg.terrain.terrain_proportions = list(env_cfg.terrain.terrain_dict.values())
     env_cfg.terrain.curriculum = False
@@ -154,6 +158,9 @@ def play(args):
                     obs_student = obs[:, :env.cfg.env.n_proprio].clone()
                     obs_student[:, 6:8] = 0
                     depth_latent_and_yaw = depth_encoder(infos["depth"], obs_student)
+                    # torch.set_printoptions(threshold=float('inf'))
+                    # print("depth image: ", infos["depth"])
+                    # print(infos["depth"].shape)
                     depth_latent = depth_latent_and_yaw[:, :-2]
                     yaw = depth_latent_and_yaw[:, -2:]
                 obs[:, 6:8] = 1.5*yaw
@@ -167,6 +174,11 @@ def play(args):
                 actions = policy(obs.detach(), hist_encoding=True, scandots_latent=depth_latent)
             
         obs, _, rews, dones, infos = env.step(actions.detach())
+        # print("obs: ", obs)
+        # print("prop: ",obs[0, :env.cfg.env.n_proprio])
+        # print("depth latent: ", depth_latent)
+        # print("lin_vel_latent: ", obs[0, env.cfg.env.n_proprio+132:env.cfg.env.n_proprio+132+9])
+        # print("priv_latent: ", obs[0, env.cfg.env.n_proprio+132+9:env.cfg.env.n_proprio+132+9+29])
         if args.web:
             web_viewer.render(fetch_results=True,
                         step_graphics=True,
@@ -178,10 +190,26 @@ def play(args):
         
         id = env.lookat_id
         
+def parse_play_args(base_args=None):
+    """Parse play-specific CLI flags without affecting other scripts.
+       Uses parse_known_args so unknown args are ignored.
+    """
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--joystick", action="store_true", default=False, help="Use joystick control")
+    parser.add_argument("--keyboard", action="store_true", default=False, help="Use keyboard control")
+    ns, _ = parser.parse_known_args()
+    if base_args is None:
+        base_args = ns
+    else:
+        # attach play-specific fields to base_args (Namespace from get_args())
+        setattr(base_args, "joystick", ns.joystick)
+        setattr(base_args, "keyboard", ns.keyboard)
+    return base_args
 
 if __name__ == '__main__':
     EXPORT_POLICY = False
     RECORD_FRAMES = False
     MOVE_CAMERA = False
     args = get_args()
+    args = parse_play_args(args)
     play(args)
