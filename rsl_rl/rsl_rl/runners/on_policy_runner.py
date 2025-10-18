@@ -261,7 +261,8 @@ class OnPolicyRunner:
                     depth_latent_and_yaw = self.alg.depth_encoder(infos["depth"].clone(), obs_prop_depth)  # clone is crucial to avoid in-place operation
                     
                     depth_latent = depth_latent_and_yaw[:, :-2]
-                    yaw = 1.5*depth_latent_and_yaw[:, -2:]
+                    yaw = obs[:, 6:8]
+                    # yaw = 1.5*depth_latent_and_yaw[:, -2:]
                     
                     depth_latent_buffer.append(depth_latent)
                     yaw_buffer_student.append(yaw)
@@ -283,8 +284,10 @@ class OnPolicyRunner:
                 #         index_end = num_obs_now + i * self.env.cfg.env.n_proprio + self.env.cfg.env.n_proprio
                 #         feet_mask[index_start:index_end] = False
                 #     obs_student[:, ~feet_mask] = 0.0
+
+                ### use origin delta yaw
                 # obs_student[:, 6:8] = yaw.detach()
-                obs_student[infos["delta_yaw_ok"], 6:8] = yaw.detach()[infos["delta_yaw_ok"]]
+                # obs_student[infos["delta_yaw_ok"], 6:8] = yaw.detach()[infos["delta_yaw_ok"]]
                 delta_yaw_ok_buffer.append(torch.nonzero(infos["delta_yaw_ok"]).size(0) / infos["delta_yaw_ok"].numel())
                 actions_student = self.alg.depth_actor(obs_student, hist_encoding=True, scandots_latent=depth_latent)
                 actions_student_buffer.append(actions_student)
