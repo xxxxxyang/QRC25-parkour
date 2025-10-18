@@ -181,7 +181,8 @@ class Terrain:
             if choice<self.proportions[3]:
                 idx = 5
                 step_height *= -1
-            terrain_utils.pyramid_stairs_terrain(terrain, step_width=0.31, step_height=step_height, platform_size=3.)
+            # terrain_utils.pyramid_stairs_terrain(terrain, step_width=0.31, step_height=step_height, platform_size=3.)
+            stairs_terrain_goal(terrain, step_width=0.31, step_height=step_height, platform_length=3., num_stones=self.num_goals-2)
             self.add_roughness(terrain)
         elif choice < self.proportions[5]:
             idx = 6
@@ -701,6 +702,71 @@ def parkour_step_terrain(terrain,
     terrain.height_field_raw[:, -pad_width:] = pad_height
     terrain.height_field_raw[:pad_width, :] = pad_height
     terrain.height_field_raw[-pad_width:, :] = pad_height
+
+def stairs_terrain_goal(terrain, 
+                    step_width, 
+                    step_height, 
+                    platform_length=1.5,
+                    num_stones=8,
+                    x_range=[0.2, 0.4],
+                    y_range=[-0.15, 0.15],
+                    half_valid_width=[0.45, 0.5]):
+    # switch parameters to discrete units
+    step_width = int(step_width / terrain.horizontal_scale)
+    
+    if step_height!=0:
+        step_height = int((step_height+0.03) / terrain.vertical_scale)
+        height = 0
+        start_x = int(platform_length/terrain.horizontal_scale)
+        stop_x = int(terrain.width - platform_length/terrain.horizontal_scale)
+            
+        while (stop_x - start_x) > 3.0/terrain.horizontal_scale:
+            start_x += step_width
+            stop_x -= step_width
+            height += step_height
+            terrain.height_field_raw[start_x: stop_x, :] = height
+            
+        # 前后平台
+        terrain.height_field_raw[:round(platform_length/terrain.horizontal_scale), :] = 0
+        terrain.height_field_raw[-round(platform_length/terrain.horizontal_scale):, :] = 0
+        
+    mid_y = terrain.length * 1/2
+    # dis_x_min = round( (x_range[0] + step_height) / terrain.horizontal_scale)
+    # dis_x_max = round( (x_range[1] + step_height) / terrain.horizontal_scale)
+    # dis_y_min = round(y_range[0] / terrain.horizontal_scale)
+    # dis_y_max = round(y_range[1] / terrain.horizontal_scale)
+    dis_x = platform_length
+    last_dis_x = dis_x
+    x_start = platform_length+30
+    x_end = terrain.width - 1.0 // terrain.horizontal_scale
+    half_valid_width = round(np.random.uniform(half_valid_width[0], half_valid_width[1]) / terrain.horizontal_scale)
+    stair_height = 0
+    goals = np.zeros((num_stones+2, 2))
+    goals[0] = [x_start, mid_y]
+    for i in range(num_stones):
+        # # rand_x = np.random.randint(dis_x_min, dis_x_max)
+        # # rand_y = np.random.randint(dis_y_min, dis_y_max)
+        # rand_x = 0
+        # rand_y = 0
+        # if i < num_stones // 2:
+        #     stair_height += step_height
+        # elif i > num_stones // 2:
+        #     stair_height -= step_height
+        # terrain.height_field_raw[round(dis_x):round(dis_x+0.1), :] = stair_height
+        # # dis_x += rand_x
+        # terrain.height_field_raw[round(last_dis_x):round(dis_x), :round(mid_y)+round(rand_y-half_valid_width)] = 0
+        # terrain.height_field_raw[round(last_dis_x):round(dis_x), round(mid_y)+round(rand_y+half_valid_width):] = 0
+
+        # last_dis_x = dis_x
+        goals[i+1] = [x_start + (i+1) * (x_end - x_start) / num_stones, mid_y]
+    # final_dis_x = dis_x + np.random.randint(dis_x_min, dis_x_max)
+    # # import ipdb; ipdb.set_trace()
+    # if final_dis_x > terrain.width:
+    #     final_dis_x = terrain.width - 0.5 // terrain.horizontal_scale
+    goals[-1] = [terrain.width - 1.0 // terrain.horizontal_scale , terrain.length * 1/2]
+    terrain.goals = goals * terrain.horizontal_scale
+        
+    return terrain
 
 def demo_terrain(terrain):
     goals = np.zeros((8, 2))

@@ -81,8 +81,8 @@ def play(args):
     env_cfg.terrain.terrain_dict = {"smooth slope": 0., 
                                     "rough slope up": 0.,
                                     "rough slope down": 0.,
-                                    "rough stairs up": 0., 
-                                    "rough stairs down": 0., 
+                                    "rough stairs up": 0.2, 
+                                    "rough stairs down": 0.2, 
                                     "discrete": 0., 
                                     "stepping stones": 0.,
                                     "gaps": 0., 
@@ -92,10 +92,10 @@ def play(args):
                                     "platform": 0.,
                                     "large stairs up": 0.,
                                     "large stairs down": 0.,
-                                    "parkour": 0.2,
-                                    "parkour_hurdle": 0.2,
-                                    "parkour_flat": 0.2,
-                                    "parkour_step": 0.2,
+                                    "parkour": 0.,
+                                    "parkour_hurdle": 0.,
+                                    "parkour_flat": 0.,
+                                    "parkour_step": 0.,
                                     "parkour_gap": 0., 
                                     "demo": 0.}
     
@@ -163,7 +163,7 @@ def play(args):
                     # print(infos["depth"].shape)
                     depth_latent = depth_latent_and_yaw[:, :-2]
                     yaw = depth_latent_and_yaw[:, -2:]
-                obs[:, 6:8] = 1.5*yaw
+                # obs[:, 6:8] = 1.5*yaw
                     
             else:
                 depth_latent = None
