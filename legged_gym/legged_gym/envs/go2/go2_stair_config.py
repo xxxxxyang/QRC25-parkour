@@ -31,7 +31,7 @@
 from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
 
 
-class Go2ClimbCfg( LeggedRobotCfg ):
+class Go2StairCfg( LeggedRobotCfg ):
     class init_state( LeggedRobotCfg.init_state ):
         pos = [0.0, 0.0, 0.42] # x,y,z [m]
         default_joint_angles = { # = target angles [rad] when action = 0.0
@@ -70,8 +70,6 @@ class Go2ClimbCfg( LeggedRobotCfg ):
     class rewards( LeggedRobotCfg.rewards ):
         soft_dof_pos_limit = 0.9
         base_height_target = 0.25
-        tracking_lin_vel_x = 1.5
-        tracking_goal_vel = 0
 
     class depth( LeggedRobotCfg.depth ):
         # position = [0.32, 0.0, 0.035]  # front camera
@@ -92,8 +90,8 @@ class Go2ClimbCfg( LeggedRobotCfg ):
         terrain_dict = {"smooth slope": 0., 
                         "rough slope up": 0.,
                         "rough slope down": 0.,
-                        "rough stairs up": 0., 
-                        "rough stairs down": 0., 
+                        "rough stairs up": 0.2, 
+                        "rough stairs down": 0.2, 
                         "discrete": 0., 
                         "stepping stones": 0.,
                         "gaps": 0., 
@@ -104,21 +102,18 @@ class Go2ClimbCfg( LeggedRobotCfg ):
                         "large stairs up": 0.,
                         "large stairs down": 0.,
                         "parkour": 0.,
-                        "parkour_hurdle": 0.25,
-                        "parkour_flat": 0.25,
-                        "parkour_step": 0.25,
+                        "parkour_hurdle": 0.,
+                        "parkour_flat": 0.2,
+                        "parkour_step": 0.2,
                         "parkour_gap": 0.,
                         "demo": 0.,}
         terrain_proportions = list(terrain_dict.values())
 
-    class domain_rand( LeggedRobotCfg.domain_rand ):
-        randomize_friction = True
-        friction_range = [0.3, 2.0]
-
-class Go2ClimbCfgPPO( LeggedRobotCfgPPO ):
+class Go2StairCfgPPO( LeggedRobotCfgPPO ):
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         entropy_coef = 0.01
     class runner( LeggedRobotCfgPPO.runner ):
         run_name = ''
-        experiment_name = 'climb'
+        experiment_name = 'leap'
 
+  
