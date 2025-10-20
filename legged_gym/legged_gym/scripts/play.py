@@ -94,8 +94,8 @@ def play(args):
                                     "large stairs down": 0.,
                                     "parkour": 0.,
                                     "parkour_hurdle": 0.,
-                                    "parkour_flat": 0.,
-                                    "parkour_step": 0.,
+                                    "parkour_flat": 0.2,
+                                    "parkour_step": 0.2,
                                     "parkour_gap": 0., 
                                     "demo": 0.}
     

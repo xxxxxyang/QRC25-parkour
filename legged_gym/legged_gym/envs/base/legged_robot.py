@@ -1292,6 +1292,14 @@ class LeggedRobot(BaseTask):
         cur_vel = self.root_states[:, 7:9]
         rew = torch.minimum(torch.sum(target_vec_norm * cur_vel, dim=-1), self.commands[:, 0]) / (self.commands[:, 0] + 1e-5)
         return rew
+    
+    def _reward_tracking_lin_vel_x(self):
+       cur_lin_vel_x = self.base_lin_vel[:, 0]
+       target_lin_vel_x = self.commands[:, 0]
+       rew = torch.exp(-torch.square(cur_lin_vel_x - target_lin_vel_x))
+       # rew = 1.0 - torch.abs(cur_lin_vel_x - target_lin_vel_x)
+       return rew
+
 
     def _reward_tracking_yaw(self):
         rew = torch.exp(-torch.abs(self.target_yaw - self.yaw))
