@@ -95,8 +95,15 @@ def play(args):
     policy.estimator.load_state_dict(ac_state_dict['estimator_state_dict'])
     
     policy = policy.to(device)#.cpu()
-    if not os.path.exists(os.path.join(load_run, "traced")):
-        os.mkdir(os.path.join(load_run, "traced"))
+    traced_dir = os.path.join(load_run, "traced")
+    if not os.path.exists(traced_dir):
+        os.mkdir(traced_dir)
+    cfg_src = os.path.join(load_run, "config.json")
+    if os.path.isfile(cfg_src):
+        try:
+            shutil.copy(cfg_src, os.path.join(traced_dir, "config.json"))
+        except Exception as e:
+            print("Could not copy config.json to traced dir:", e)
     state_dict = {'depth_encoder_state_dict': ac_state_dict['depth_encoder_state_dict']}
     torch.save(state_dict, os.path.join(load_run, "traced", args.exptid + "-" + str(checkpoint) + "-vision_weight.pt"))
 
