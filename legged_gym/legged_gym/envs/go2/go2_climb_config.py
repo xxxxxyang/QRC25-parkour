@@ -70,8 +70,9 @@ class Go2ClimbCfg( LeggedRobotCfg ):
     class rewards( LeggedRobotCfg.rewards ):
         soft_dof_pos_limit = 0.9
         base_height_target = 0.25
-        tracking_lin_vel_x = 1.5
-        tracking_goal_vel = 0
+        class scales( LeggedRobotCfg.rewards.scales ):
+            tracking_lin_vel_x = 1.5
+            tracking_goal_vel = 0
 
     class depth( LeggedRobotCfg.depth ):
         # position = [0.32, 0.0, 0.035]  # front camera
