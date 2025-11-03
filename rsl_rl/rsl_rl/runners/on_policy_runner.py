@@ -44,6 +44,7 @@ import datetime
 from rsl_rl.algorithms import PPO
 from rsl_rl.modules import *
 from rsl_rl.env import VecEnv
+from rsl_rl.utils.utils import cfg_to_dict
 import sys
 from copy import copy, deepcopy
 import warnings
@@ -516,10 +517,10 @@ class OnPolicyRunner:
         torch.save(state_dict, path)
         try:
             cfg_dir = os.path.dirname(path)
-            cfg_dict = OnPolicyRunner._cfg_to_dict(self.env.cfg)
+            cfg_dict = cfg_to_dict(self.env.cfg)
             cfg_path = os.path.join(cfg_dir, "config.json")
             with open(cfg_path, "w", encoding="utf-8") as f:
-                json.dump(cfg_dict, f, indent=2, ensure_ascii=False)
+                json.dump(cfg_dict, f, indent=4, ensure_ascii=False)
             try:
                 if wandb and getattr(wandb, "run", None) is not None:
                     wandb.save(cfg_path)
@@ -587,89 +588,3 @@ class OnPolicyRunner:
         if device is not None:
             self.alg.discriminator.to(device)
         return self.alg.discriminator.inference
-
-    @staticmethod
-    def _cfg_to_dict(obj):
-        try:
-            import numpy as _np
-        except Exception:
-            _np = None
-        try:
-            import torch as _torch
-        except Exception:
-            _torch = None
-
-        # primitives
-        if obj is None or isinstance(obj, (str, int, float, bool)):
-            return obj
-
-        # numpy / torch
-        if _np is not None and isinstance(obj, _np.ndarray):
-            return obj.tolist()
-        if _np is not None and isinstance(obj, _np.generic):
-            return obj.item()
-        if _torch is not None and isinstance(obj, _torch.Tensor):
-            try:
-                if obj.numel() == 1:
-                    return obj.item()
-                else:
-                    return obj.detach().cpu().tolist()
-            except Exception:
-                return str(obj)
-
-        # mapping
-        if isinstance(obj, dict):
-            return {k: OnPolicyRunner._cfg_to_dict(v) for k, v in obj.items()}
-
-        # sequence
-        if isinstance(obj, (list, tuple, set)):
-            return [OnPolicyRunner._cfg_to_dict(v) for v in obj]
-
-        # if it's a class object (type), inspect its class attributes
-        if isinstance(obj, type):
-            out = {}
-            for k, v in obj.__dict__.items():
-                if k.startswith("_"):
-                    continue
-                if callable(v):
-                    continue
-                out[k] = OnPolicyRunner._cfg_to_dict(v)
-            if out:
-                return out
-
-        # try common cfg helpers
-        if hasattr(obj, "to_dict") and callable(obj.to_dict):
-            try:
-                return OnPolicyRunner._cfg_to_dict(obj.to_dict())
-            except Exception:
-                pass
-        if hasattr(obj, "as_dict") and callable(obj.as_dict):
-            try:
-                return OnPolicyRunner._cfg_to_dict(obj.as_dict())
-            except Exception:
-                pass
-
-        # instance / object: use dir() to collect non-callable, non-private attributes
-        try:
-            out = {}
-            for k in dir(obj):
-                if k.startswith("_"):
-                    continue
-                try:
-                    v = getattr(obj, k)
-                except Exception:
-                    continue
-                if callable(v):
-                    continue
-                out[k] = OnPolicyRunner._cfg_to_dict(v)
-            # remove empty results that only contain builtin attrs
-            if out:
-                return out
-        except Exception:
-            pass
-
-        # fallback to string
-        try:
-            return str(obj)
-        except Exception:
-            return None

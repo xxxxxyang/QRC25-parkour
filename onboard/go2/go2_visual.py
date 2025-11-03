@@ -28,13 +28,14 @@ class VisualHandlerNode(Node):
     def __init__(self,
             cfg: dict,
             cropping: list = [0, 0, 0, 0], # top, bottom, left, right
-            rs_resolution: tuple = (480, 270), # width, height for the realsense camera)
-            rs_fps: int= 30,
-            depth_input_topic= "/camera/forward_depth",
-            rgb_topic= "/camera/forward_rgb",
-            camera_info_topic= "/camera/camera_info",
-            enable_rgb= False,
-            forward_depth_embedding_topic= "/forward_depth_embedding",
+            rs_resolution: tuple = (480, 270), # width, height for the realsense camera
+            rs_fps: int = 30,
+            depth_input_topic = "/camera/forward_depth",
+            rgb_topic = "/camera/forward_rgb",
+            camera_info_topic = "/camera/camera_info",
+            enable_rgb = False,
+            forward_depth_topic = "/forward_depth_image",
+            debug = False
         ):
         super().__init__("forward_depth_embedding")
         self.cfg = cfg
@@ -45,22 +46,22 @@ class VisualHandlerNode(Node):
         self.rgb_topic= rgb_topic
         self.camera_info_topic = camera_info_topic
         self.enable_rgb= enable_rgb
-        self.forward_depth_embedding_topic = forward_depth_embedding_topic
+        self.forward_depth_topic = forward_depth_topic
+        self.debug = debug
 
         self.parse_args()
         self.start_pipeline()
         self.start_ros_handlers()
 
     def parse_args(self):
-        self.output_resolution = self.cfg["sensor"]["forward_camera"].get(
-            "output_resolution",
-            self.cfg["sensor"]["forward_camera"]["resolution"],
-        )
-        depth_range = self.cfg["sensor"]["forward_camera"].get(
-            "depth_range",
-            [0.0, 3.0],
-        )
-        self.depth_range = (depth_range[0] * 1000, depth_range[1] * 1000) # [m] -> [mm]
+        orig = self.cfg["depth"].get(
+            "original",
+            [87, 58]
+        )   # (W, H)
+        self.output_resolution = [orig[1], orig[0]] # (H, W)
+        near = self.cfg["depth"].get("near_plane", 0.1) # [m]
+        far = self.cfg["depth"].get("far_clip", 2.0) # [m]
+        self.depth_range = (near * 1000, far * 1000) # [m] -> [mm]
 
     def start_pipeline(self):
         self.rs_pipeline = rs.pipeline()
@@ -80,7 +81,19 @@ class VisualHandlerNode(Node):
                 rs.format.rgb8,
                 self.rs_fps,
             )
-        self.rs_profile = self.rs_pipeline.start(self.rs_config)
+        self.rs_profile = self.rs_pipeline.start(self.rs_config) # config profile
+        if self.debug:
+            info = VisualHandlerNode.get_rs_profile_info(self.rs_profile)
+            # print out stream resolutions
+            for name, s in info.get("streams", {}).items():
+                w = s.get("width")
+                h = s.get("height")
+                if w is not None and h is not None:
+                    self.get_logger().info(f"{name} resolution: {w}x{h}", once= True)
+            # print out depth scale
+            depth_scale = info.get("depth_scale", None)
+            if depth_scale is not None:
+                self.get_logger().info(f"Depth scale: {depth_scale} m/unit", once= True)
 
         self.rs_align = rs.align(rs.stream.depth)
 
@@ -107,8 +120,9 @@ class VisualHandlerNode(Node):
         if self.enable_rgb:
             # get frame with longer waiting time to start the system
             # I know what's going on, but when enabling rgb, this solves the problem.
+            latency_range = self.cfg["sensor"]["forward_camera"]["latency_range"] if self.cfg["sensor"]["forward_camera"].get("latency_range", None) is not None else [0.08, 0.142]
             rs_frame = self.rs_pipeline.wait_for_frames(int(
-                self.cfg["sensor"]["forward_camera"]["latency_range"][1] * 10000 # ms * 10
+                latency_range[1] * 10000 # ms * 10
             ))
 
     def start_ros_handlers(self):
@@ -173,9 +187,9 @@ class VisualHandlerNode(Node):
                 self.publish_camera_info_callback,
             )
 
-        self.forward_depth_embedding_pub = self.create_publisher(
+        self.forward_depth_image_pub = self.create_publisher(
             Float32MultiArray,
-            self.forward_depth_embedding_topic,
+            self.forward_depth_topic,
             1,
         )
         self.get_logger().info("ros handlers started")
@@ -190,8 +204,9 @@ class VisualHandlerNode(Node):
         top, bottom, left, right = self.cropping
         h_end = None if bottom == 0 else -bottom
         w_end = None if right == 0 else -right
+        latency_range = self.cfg["depth"]["latency_range"] if self.cfg["depth"].get("latency_range", None) is not None else [0.08, 0.142]
         rs_frame = self.rs_pipeline.wait_for_frames(int(
-            self.cfg["sensor"]["forward_camera"]["latency_range"][1] * 1000 # ms
+            latency_range[1] * 1000 # ms
         ))
         if self.enable_rgb:
             rs_frame = self.rs_align.process(rs_frame)
@@ -202,15 +217,11 @@ class VisualHandlerNode(Node):
         color_frame = rs_frame.get_color_frame()
         if color_frame:
             rgb_image_np = np.asanyarray(color_frame.get_data())
-            rgb_image_np = np.rot90(rgb_image_np, k= 2) # since the camera is inverted
+            # rgb_image_np = np.rot90(rgb_image_np, k= 2) # since the camera is inverted
             rgb_image_np = rgb_image_np[
                 top:h_end,
                 left:w_end,
             ]
-            # rgb_image_np = rgb_image_np[ 
-            #     self.cropping[0]: -self.cropping[1]-1,
-            #     self.cropping[2]: -self.cropping[3]-1,
-            # ]
             rgb_image_msg = rnp.msgify(Image, rgb_image_np, encoding= "rgb8")
             rgb_image_msg.header.stamp = self.get_clock().now().to_msg()
             rgb_image_msg.header.frame_id = "d435_sim_depth_link"
@@ -220,9 +231,9 @@ class VisualHandlerNode(Node):
         # apply relsense filters
         for rs_filter in self.rs_filters:
             depth_frame = rs_filter.process(depth_frame)
+        # TODO: check if depth_frame shape is (1, 1, H, W)
         depth_image_np = np.asanyarray(depth_frame.get_data())
-        # rotate 180 degree because d435i on h1 head is mounted inverted
-        depth_image_np = np.rot90(depth_image_np, k= 2) # k = 2 for rotate 90 degree twice
+        # depth_image_np = np.rot90(depth_image_np, k= 2) # k = 2 for rotate 90 degree twice
         depth_image_pyt = torch.from_numpy(depth_image_np.astype(np.float32)).unsqueeze(0).unsqueeze(0)
         
         # apply torch filters
@@ -231,22 +242,20 @@ class VisualHandlerNode(Node):
             top:h_end,
             left:w_end,
         ]
-        # depth_image_pyt = depth_image_pyt[:, :,
-        #     self.cropping[0]: -self.cropping[1]-1,
-        #     self.cropping[2]: -self.cropping[3]-1,
-        # ]
         depth_image_pyt = torch.clip(depth_image_pyt, self.depth_range[0], self.depth_range[1]) / (self.depth_range[1] - self.depth_range[0])
         depth_image_pyt = resize2d(depth_image_pyt, self.output_resolution)
+        depth_image_pyt -= 0.5 # normalize to [-0.5, 0.5]
 
         # publish the depth image input to ros topic
         self.get_logger().info("depth range: {}-{}".format(*self.depth_range), once= True)
         depth_input_data = (
-            depth_image_pyt.detach().cpu().numpy() * (self.depth_range[1] - self.depth_range[0]) + self.depth_range[0]
+            (depth_image_pyt.detach().cpu().numpy()+0.5) * (self.depth_range[1] - self.depth_range[0]) + self.depth_range[0]
         ).astype(np.uint16)[0, 0] # (h, w) unit [mm]
         # DEBUG: centering the depth image
-        # depth_input_data = depth_input_data.copy()
-        # depth_input_data[int(depth_input_data.shape[0] / 2), :] = 0
-        # depth_input_data[:, int(depth_input_data.shape[1] / 2)] = 0
+        if self.debug:
+            depth_input_data = depth_input_data.copy()
+            depth_input_data[int(depth_input_data.shape[0] / 2), :] = 0
+            depth_input_data[:, int(depth_input_data.shape[1] / 2)] = 0
 
         depth_input_msg = rnp.msgify(Image, depth_input_data, encoding= "16UC1")
         depth_input_msg.header.stamp = self.get_clock().now().to_msg()
@@ -256,14 +265,73 @@ class VisualHandlerNode(Node):
 
         return depth_image_pyt
     
-    def publish_depth_embedding(self, embedding):
-        msg = Float32MultiArray()
-        msg.data = embedding.squeeze().detach().cpu().numpy().tolist()
-        self.forward_depth_embedding_pub.publish(msg)
-        self.get_logger().info("depth embedding published", once= True)
+    def get_rs_profile_info(profile):
+        info = {}
+        dev = profile.get_device()
+        info['serial_number'] = dev.get_info(rs.camera_info.serial_number)
+        info['product_line'] = dev.get_info(rs.camera_info.product_line)
 
-    def register_models(self, visual_encoder):
-        self.visual_encoder = visual_encoder
+        # depth scale (if available)
+        try:
+            depth_sensor = dev.first_depth_sensor()
+            info['depth_scale'] = depth_sensor.get_depth_scale()
+        except Exception:
+            info['depth_scale'] = None
+
+        streams = {}
+        for sp in profile.get_streams():
+            if sp.stream_type() == rs.stream.depth:
+                name = 'depth'
+            elif sp.stream_type() == rs.stream.color:
+                name = 'color'
+            elif sp.stream_type() == rs.stream.infrared:
+                name = 'infrared'
+            else:
+                name = str(sp.stream_type())
+
+            s = {'format': str(sp.format()), 'fps': sp.fps()}
+            try:
+                vsp = sp.as_video_stream_profile()
+                intr = vsp.get_intrinsics()
+                s.update({
+                    'width': vsp.width,
+                    'height': vsp.height,
+                    'intrinsics': {
+                        'fx': intr.fx,
+                        'fy': intr.fy,
+                        'ppx': intr.ppx,
+                        'ppy': intr.ppy,
+                        'model': int(intr.model),
+                        'coeffs': list(intr.coeffs),
+                    }
+                })
+            except Exception:
+                # not a video profile or intrinsics not available
+                pass
+
+            streams[name] = s
+
+        info['streams'] = streams
+
+        # extrinsics between depth and color (if both present)
+        try:
+            depth_vsp = profile.get_stream(rs.stream.depth).as_video_stream_profile()
+            color_vsp = profile.get_stream(rs.stream.color).as_video_stream_profile()
+            extr = depth_vsp.get_extrinsics_to(color_vsp)
+            info['extrinsics_depth_to_color'] = {
+                'rotation': list(extr.rotation),
+                'translation': list(extr.translation),
+            }
+        except Exception:
+            pass
+
+        return info
+    
+    def publish_depth_data(self, depth_data):
+        msg = Float32MultiArray()
+        msg.data = depth_data.flatten().detach().cpu().numpy().tolist()
+        self.forward_depth_image_pub.publish(msg)
+        self.get_logger().info("depth data published", once= True)
 
     def start_main_loop_timer(self, duration):
         self.create_timer(
@@ -274,58 +342,30 @@ class VisualHandlerNode(Node):
     def main_loop(self):
         depth_image_pyt = self.get_depth_frame()
         if depth_image_pyt is not None:
-            embedding = self.visual_encoder(depth_image_pyt)
-            self.publish_depth_embedding(embedding)
+            self.publish_depth_data(depth_image_pyt)
         else:
             self.get_logger().warn("One frame of depth embedding if not acquired")
 
 @torch.inference_mode()
 def main(args):
     rclpy.init()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     assert args.logdir is not None, "Please provide a logdir"
     with open(osp.join(args.logdir, "config.json"), "r") as f:
         config_dict = json.load(f, object_pairs_hook= OrderedDict)
         
-    device = "cpu"
-    duration = config_dict["sensor"]["forward_camera"]["refresh_duration"] # in sec
+    duration = 0.01 # in sec
 
     visual_node = VisualHandlerNode(
-        cfg= json.load(open(osp.join(args.logdir, "config.json"), "r")),
+        cfg= config_dict,
         cropping= [args.crop_top, args.crop_bottom, args.crop_left, args.crop_right],
         rs_resolution= (args.width, args.height),
         rs_fps= args.fps,
         enable_rgb= args.rgb,
+        debug= args.debug,
     )
 
-    env_node = UnitreeRos2Real(
-        "visual_h1",
-        low_cmd_topic= "low_cmd_dryrun", # This node should not publish any command at all
-        cfg= config_dict,
-        model_device= device,
-        robot_class_name= "Go2",
-        dryrun= True, # The robot node in this process should not run at all
-    )
-
-    model = getattr(modules, config_dict["runner"]["policy_class_name"])(
-        num_actor_obs = env_node.num_obs,
-        num_critic_obs = env_node.num_privileged_obs,
-        num_actions= env_node.num_actions,
-        obs_segments= env_node.obs_segments,
-        privileged_obs_segments= env_node.privileged_obs_segments,
-        **config_dict["policy"],
-    )
-    # load the model with the latest checkpoint
-    model_names = [i for i in os.listdir(args.logdir) if i.startswith("model_")]
-    model_names.sort(key= lambda x: int(x.split("_")[-1].split(".")[0]))
-    state_dict = torch.load(osp.join(args.logdir, model_names[-1]), map_location= "cpu")
-    model.load_state_dict(state_dict["model_state_dict"])
-    model.to(device)
-    model = model.encoders[0] # the first encoder is the visual encoder
-    env_node.destroy_node()
-
-    visual_node.get_logger().info("Embedding send duration: {:.2f} sec".format(duration))
-    visual_node.register_models(model)
     if args.loop_mode == "while":
         rclpy.spin_once(visual_node, timeout_sec= 0.)
         while rclpy.ok():
@@ -389,6 +429,11 @@ if __name__ == "__main__":
     parser.add_argument("--loop_mode", type= str, default= "timer",
         choices= ["while", "timer"],
         help= "Select which mode to run the main policy control iteration",
+    )
+    parser.add_argument("--debug", 
+        action= "store_true",
+        default= False,
+        help= "Set to enable debug mode",
     )
 
     args = parser.parse_args()

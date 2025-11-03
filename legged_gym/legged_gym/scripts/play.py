@@ -46,7 +46,9 @@ from copy import deepcopy
 import matplotlib.pyplot as plt
 from time import time, sleep
 from legged_gym.utils import webviewer
+from legged_gym.utils.helpers import cfg_to_dict
 import argparse
+import json
 
 def get_load_path(root, load_run=-1, checkpoint=-1, model_name_include="model"):
     if checkpoint==-1:
@@ -115,6 +117,18 @@ def play(args):
     # prepare environment
     env: LeggedRobot
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
+
+    # if no config.json in logdir
+    cfg_path = os.path.join(log_pth, "config.json")
+    try:
+        if not os.path.isfile(cfg_path):
+            cfg_dict = cfg_to_dict(env.cfg)
+            with open(cfg_path, "w") as f:
+                json.dump(cfg_dict, f, indent=4, ensure_ascii=False)
+            print(f"Saved env cfg to {cfg_path}")
+    except Exception as e:
+        print("Could not save config.json to logdir:", e)
+
     obs = env.get_observations()
 
     if args.web:
