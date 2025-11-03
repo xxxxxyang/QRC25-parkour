@@ -81,8 +81,8 @@ def play(args):
     env_cfg.terrain.terrain_dict = {"smooth slope": 0., 
                                     "rough slope up": 0.,
                                     "rough slope down": 0.,
-                                    "rough stairs up": 0.2, 
-                                    "rough stairs down": 0.2, 
+                                    "rough stairs up": 0., 
+                                    "rough stairs down": 0., 
                                     "discrete": 0., 
                                     "stepping stones": 0.,
                                     "gaps": 0., 
@@ -158,27 +158,21 @@ def play(args):
                     obs_student = obs[:, :env.cfg.env.n_proprio].clone()
                     obs_student[:, 6:8] = 0
                     depth_latent_and_yaw = depth_encoder(infos["depth"], obs_student)
-                    # torch.set_printoptions(threshold=float('inf'))
-                    # print("depth image: ", infos["depth"])
-                    # print(infos["depth"].shape)
                     depth_latent = depth_latent_and_yaw[:, :-2]
                     yaw = depth_latent_and_yaw[:, -2:]
                 # obs[:, 6:8] = 1.5*yaw
+                obs[:, 6:8] = 0*yaw
                     
             else:
                 depth_latent = None
             
             if hasattr(ppo_runner.alg, "depth_actor"):
+                # print("obs_yaw_actor: ", obs[env.lookat_id, 6:8].detach())
                 actions = ppo_runner.alg.depth_actor(obs.detach(), hist_encoding=True, scandots_latent=depth_latent)
             else:
                 actions = policy(obs.detach(), hist_encoding=True, scandots_latent=depth_latent)
             
         obs, _, rews, dones, infos = env.step(actions.detach())
-        # print("obs: ", obs)
-        # print("prop: ",obs[0, :env.cfg.env.n_proprio])
-        # print("depth latent: ", depth_latent)
-        # print("lin_vel_latent: ", obs[0, env.cfg.env.n_proprio+132:env.cfg.env.n_proprio+132+9])
-        # print("priv_latent: ", obs[0, env.cfg.env.n_proprio+132+9:env.cfg.env.n_proprio+132+9+29])
         if args.web:
             web_viewer.render(fetch_results=True,
                         step_graphics=True,
@@ -186,7 +180,8 @@ def play(args):
                         wait_for_page_load=True)
         print("time:", env.episode_length_buf[env.lookat_id].item() / 50, 
               "cmd vx", env.commands[env.lookat_id, 0].item(),
-              "actual vx", env.base_lin_vel[env.lookat_id, 0].item(), )
+              "actual vx", env.base_lin_vel[env.lookat_id, 0].item(), 
+              "obs_yaw", obs.detach()[env.lookat_id, 6:8].cpu().tolist(), )
         
         id = env.lookat_id
         
@@ -212,4 +207,6 @@ if __name__ == '__main__':
     MOVE_CAMERA = False
     args = get_args()
     args = parse_play_args(args)
+    if getattr(args, "num_envs", None) is None:
+        args.num_envs = 4
     play(args)
