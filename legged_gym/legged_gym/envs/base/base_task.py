@@ -175,9 +175,9 @@ class BaseTask():
                     if evt.action == "vx_minus" and evt.value > 0:
                         self.commands[self.lookat_id, 0] -= 0.2
                     if evt.action == "left_turn" and evt.value > 0:
-                        self.commands[self.lookat_id, 3] += 0.5
+                        self.commands[self.lookat_id, 2] += 0.5
                     if evt.action == "right_turn" and evt.value > 0:
-                        self.commands[self.lookat_id, 3] -= 0.5
+                        self.commands[self.lookat_id, 2] -= 0.5
                 if evt.action == "free_cam" and evt.value > 0:
                     self.free_cam = not self.free_cam
                     if self.free_cam:
@@ -216,3 +216,5 @@ class BaseTask():
                 look_at_pos = self.root_states[self.lookat_id, :3].clone()
                 self.lookat_vec = cam_trans - look_at_pos
             
+    def set_curriculum_metric(self, value: float):
+        raise NotImplementedError

@@ -2,9 +2,7 @@ isaacgym*
 .ipynb_checkpoints/
 .vscode/
 *img
-<<<<<<< HEAD
 onboard/a1
 onboard/Deploy-Go1.md
-=======
 *.sh
->>>>>>> 9f5d25155c0deb6f120a21d47c5d4113b06670ac
+tmp/

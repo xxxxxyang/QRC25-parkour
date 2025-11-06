@@ -58,3 +58,6 @@ class VecEnv(ABC):
     @abstractmethod
     def get_privileged_observations(self) -> Union[torch.Tensor, None]:
         pass
+    @abstractmethod
+    def set_curriculum_metric(self, value: float):
+        pass

@@ -80,27 +80,27 @@ def play(args):
     env_cfg.terrain.num_rows = 5
     env_cfg.terrain.num_cols = 5
     env_cfg.terrain.height = [0.02, 0.02]
-    env_cfg.terrain.terrain_dict = {"smooth slope": 0., 
-                                    "rough slope up": 0.,
-                                    "rough slope down": 0.,
-                                    "rough stairs up": 0., 
-                                    "rough stairs down": 0., 
-                                    "discrete": 0., 
-                                    "stepping stones": 0.,
-                                    "gaps": 0., 
-                                    "smooth flat": 0,
-                                    "pit": 0.,
-                                    "wall": 0.,
-                                    "platform": 0.,
-                                    "large stairs up": 0.,
-                                    "large stairs down": 0.,
-                                    "parkour": 0.,
-                                    "parkour_hurdle": 0.,
-                                    "parkour_flat": 0.2,
-                                    "parkour_step": 0.2,
-                                    "parkour_gap": 0., 
-                                    "demo": 0.}
-    
+    if args.terrain:
+        env_cfg.terrain.terrain_dict = {"smooth slope": 0., 
+                                        "rough slope up": 0.,
+                                        "rough slope down": 0.,
+                                        "rough stairs up": 0., 
+                                        "rough stairs down": 0., 
+                                        "discrete": 0., 
+                                        "stepping stones": 0.,
+                                        "gaps": 0., 
+                                        "smooth flat": 0,
+                                        "pit": 0.,
+                                        "wall": 0.,
+                                        "platform": 0.,
+                                        "large stairs up": 0.,
+                                        "large stairs down": 0.,
+                                        "parkour": 0.,
+                                        "parkour_hurdle": 0.,
+                                        "parkour_flat": 0.2,
+                                        "parkour_step": 0.2,
+                                        "parkour_gap": 0., 
+                                        "demo": 0.}
     env_cfg.terrain.terrain_proportions = list(env_cfg.terrain.terrain_dict.values())
     env_cfg.terrain.curriculum = False
     env_cfg.terrain.max_difficulty = True
@@ -117,6 +117,8 @@ def play(args):
     # prepare environment
     env: LeggedRobot
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
+    env.commands[:, 0] = 0.6
+    env.commands[:, 2] = 0.0
 
     # if no config.json in logdir
     cfg_path = os.path.join(log_pth, "config.json")
@@ -175,7 +177,7 @@ def play(args):
                     depth_latent = depth_latent_and_yaw[:, :-2]
                     yaw = depth_latent_and_yaw[:, -2:]
                 # obs[:, 6:8] = 1.5*yaw
-                obs[:, 6:8] = 0*yaw
+                # obs[:, 6:8] = 0*yaw
                     
             else:
                 depth_latent = None
@@ -196,31 +198,39 @@ def play(args):
               "cmd vx", env.commands[env.lookat_id, 0].item(),
               "actual vx", env.base_lin_vel[env.lookat_id, 0].item(), 
               "obs_yaw", obs.detach()[env.lookat_id, 6:8].cpu().tolist(), )
+        if args.keyboard or args.joystick:
+            print("cmd yaw", env.commands[env.lookat_id, 2].item(),
+                    "actual yaw", env.yaw[env.lookat_id].item(),)
         
         id = env.lookat_id
         
 def parse_play_args(base_args=None):
-    """Parse play-specific CLI flags without affecting other scripts.
-       Uses parse_known_args so unknown args are ignored.
-    """
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--joystick", action="store_true", default=False, help="Use joystick control")
-    parser.add_argument("--keyboard", action="store_true", default=False, help="Use keyboard control")
-    ns, _ = parser.parse_known_args()
+    parser.add_argument("--joystick", action="store_true", default=False)
+    parser.add_argument("--keyboard", action="store_true", default=False)
+    parser.add_argument("--terrain", action="store_true", default=False)
+
+    ns, unknown = parser.parse_known_args()
+    import sys
+    sys.argv = [sys.argv[0]] + unknown
+
     if base_args is None:
-        base_args = ns
+        return ns
     else:
-        # attach play-specific fields to base_args (Namespace from get_args())
-        setattr(base_args, "joystick", ns.joystick)
-        setattr(base_args, "keyboard", ns.keyboard)
-    return base_args
+        for k, v in vars(ns).items():
+            setattr(base_args, k, v)
+        return base_args
+
 
 if __name__ == '__main__':
     EXPORT_POLICY = False
     RECORD_FRAMES = False
     MOVE_CAMERA = False
+    play_args = parse_play_args(None)
     args = get_args()
-    args = parse_play_args(args)
+    for k, v in vars(play_args).items():
+        setattr(args, k, v)
+    print(args)
     if getattr(args, "num_envs", None) is None:
         args.num_envs = 4
     play(args)

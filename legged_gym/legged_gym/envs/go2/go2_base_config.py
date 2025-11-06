@@ -29,9 +29,10 @@
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
 from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
+import numpy as np
 
 
-class Go2FlatCfg( LeggedRobotCfg ):
+class Go2BaseCfg( LeggedRobotCfg ):
     class init_state( LeggedRobotCfg.init_state ):
         pos = [0.0, 0.0, 0.42] # x,y,z [m]
         default_joint_angles = { # = target angles [rad] when action = 0.0
@@ -50,6 +51,9 @@ class Go2FlatCfg( LeggedRobotCfg ):
             'FR_calf_joint': -1.5,  # [rad]
             'RR_calf_joint': -1.5,    # [rad]
         }
+
+    class env( LeggedRobotCfg.env ):
+        num_envs = 4096
 
     class control( LeggedRobotCfg.control ):
         # PD Drive parameters:
@@ -70,6 +74,11 @@ class Go2FlatCfg( LeggedRobotCfg ):
     class rewards( LeggedRobotCfg.rewards ):
         soft_dof_pos_limit = 0.9
         base_height_target = 0.25
+        class scales( LeggedRobotCfg.rewards.scales ):
+            tracking_goal_vel = 0
+            tracking_lin_vel = 1.5
+            stand_still = -0.2
+            orientation = -1.5
 
     class depth( LeggedRobotCfg.depth ):
         # position = [0.32, 0.0, 0.035]  # front camera
@@ -87,6 +96,10 @@ class Go2FlatCfg( LeggedRobotCfg ):
         near_plane = 0.1
 
     class terrain( LeggedRobotCfg.terrain ):
+        curriculum = False # No curriculum
+        # more rough
+        downsampled_scale = 0.06
+        height = [0.02, 0.12]
         terrain_dict = {"smooth slope": 0., 
                         "rough slope up": 0.,
                         "rough slope down": 0.,
@@ -109,14 +122,25 @@ class Go2FlatCfg( LeggedRobotCfg ):
                         "demo": 0.,}
         terrain_proportions = list(terrain_dict.values())
 
+    class commands( LeggedRobotCfg.commands ):
+        heading_command = False
+        curriculum = False
+        class max_ranges( LeggedRobotCfg.commands.max_ranges ):
+            # lin_vel_x = [0.3, 0.8]  # [m/s]
+            lin_vel_x = [-0.5, 1.0]  # [m/s]
+            # lin_vel_x = [-0.5, 2.0]  # [m/s]
+            lin_vel_y = [0.0, 0.0]  # [m/s]
+            ang_yaw = [-np.pi, np.pi]  # [rad]
+            delta_yaw_threhold = np.pi # [rad] clip  (ang_yaw/command_yaw - cur_yaw) to this range
+
     class domain_rand( LeggedRobotCfg.domain_rand ):
         randomize_friction = True
         friction_range = [0.3, 2.0]
 
-class Go2FlatCfgPPO( LeggedRobotCfgPPO ):
+class Go2BaseCfgPPO( LeggedRobotCfgPPO ):
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         entropy_coef = 0.01
     class runner( LeggedRobotCfgPPO.runner ):
         run_name = ''
-        experiment_name = 'flat'
+        experiment_name = 'base'
 

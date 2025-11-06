@@ -449,6 +449,10 @@ class OnPolicyRunner:
         wandb_dict['Perf/collection time'] = locs['collection_time']
         wandb_dict['Perf/learning_time'] = locs['learn_time']
         if len(locs['rewbuffer']) > 0:
+            try:
+                self.env.set_curriculum_metric(statistics.mean(locs['rewbuffer']))
+            except Exception:
+                pass
             wandb_dict['Train/mean_reward'] = statistics.mean(locs['rewbuffer'])
             wandb_dict['Train/mean_reward_explr'] = statistics.mean(locs['rew_explr_buffer'])
             wandb_dict['Train/mean_reward_task'] = wandb_dict['Train/mean_reward'] - wandb_dict['Train/mean_reward_explr']

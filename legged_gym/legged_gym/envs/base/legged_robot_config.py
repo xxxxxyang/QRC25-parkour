@@ -205,7 +205,7 @@ class LeggedRobotCfg(BaseConfig):
         max_curriculum = 1.
         num_commands = 4 # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
         resampling_time = 6. # time before command are changed[s]
-        heading_command = True # if true: compute ang vel command from heading error
+        heading_command = False # use command to calculate target yaw
         
         lin_vel_clip = 0.2
         ang_vel_clip = 0.4
@@ -213,14 +213,14 @@ class LeggedRobotCfg(BaseConfig):
         class ranges:
             lin_vel_x = [0., 1.5] # min max [m/s]
             lin_vel_y = [0.0, 0.0]   # min max [m/s]
-            ang_vel_yaw = [0, 0]    # min max [rad/s]
+            ang_yaw = [0, 0]    # min max [rad/s]
             heading = [0, 0]
 
         # Easy ranges
         class max_ranges:
             lin_vel_x = [0.3, 0.8] # min max [m/s]
             lin_vel_y = [-0.3, 0.3]#[0.15, 0.6]   # min max [m/s]
-            ang_vel_yaw = [-0, 0]    # min max [rad/s]
+            ang_yaw = [-0, 0]    # min max [rad/s]
             heading = [-1.6, 1.6]
 
         class crclm_incremnt:
@@ -296,7 +296,6 @@ class LeggedRobotCfg(BaseConfig):
         class scales:
             # tracking rewards
             tracking_goal_vel = 1.5
-            tracking_lin_vel_x = 2.0
             tracking_yaw = 0.5
             # regularization rewards
             lin_vel_z = -1.0

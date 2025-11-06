@@ -40,6 +40,9 @@ class RecurrentDepthBackbone(nn.Module):
     def detach_hidden_states(self):
         self.hidden_states = self.hidden_states.detach().clone()
 
+    def reset(self):
+        self.hidden_states = None
+
 class StackDepthEncoder(nn.Module):
     def __init__(self, base_backbone, env_cfg) -> None:
         super().__init__()

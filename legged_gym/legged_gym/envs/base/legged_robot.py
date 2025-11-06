@@ -97,6 +97,8 @@ class LeggedRobot(BaseTask):
         self.init_done = False
         self._parse_cfg(self.cfg)
         super().__init__(self.cfg, sim_params, physics_engine, sim_device, headless)
+        self.curriculum_metric_smooth = 0.0
+        self.curriculum_update_alpha = 0.1
 
         self.resize_transform = torchvision.transforms.Resize((self.cfg.depth.resized[1], self.cfg.depth.resized[0]), 
                                                               interpolation=torchvision.transforms.InterpolationMode.BICUBIC)
@@ -224,7 +226,11 @@ class LeggedRobot(BaseTask):
 
         norm = torch.norm(self.target_pos_rel, dim=-1, keepdim=True)
         target_vec_norm = self.target_pos_rel / (norm + 1e-5)
-        self.target_yaw = torch.atan2(target_vec_norm[:, 1], target_vec_norm[:, 0])
+        if self.cfg.commands.heading_command:
+            self.target_yaw = wrap_to_pi(self.commands[:, 2]) # use command as target yaw
+        else:
+            self.target_yaw = torch.atan2(target_vec_norm[:, 1], target_vec_norm[:, 0])
+        
 
         norm = torch.norm(self.next_target_pos_rel, dim=-1, keepdim=True)
         target_vec_norm = self.next_target_pos_rel / (norm + 1e-5)
@@ -397,21 +403,24 @@ class LeggedRobot(BaseTask):
         imu_obs = torch.stack((self.roll, self.pitch), dim=1)
 
         if self.cfg.env.joystick_ctrl:
+            # TODO： need to be modified for target yaw
             # use joystick(gamepad) control
-            lin_speed, ang_speed, gait_type, e_stop, _ = self.command_function()
+            lin_speed, delta_yaw, gait_type, e_stop, _ = self.command_function()
             if e_stop:
                 import sys
                 sys.exit(0)
             self.commands[:, 0] = lin_speed[0]
             self.commands[:, 1] = lin_speed[1]
             # yaw command
-            self.delta_yaw = torch.tensor(ang_speed, device = self.device).unsqueeze(0)
+            # self.target_yaw = wrap_to_pi(torch.tensor(yaw, device = self.device).unsqueeze(0))
+            self.delta_yaw = wrap_to_pi(delta_yaw)
             self.delta_next_yaw = self.delta_yaw
         elif self.cfg.env.keyboard_ctrl:
             # use keyboard control ang_speed
-            self.delta_yaw = self.commands[:, 3]
-            self.delta_next_yaw = self.commands[:, 3]
-        elif self.global_counter % 5 == 0:
+            self.target_yaw = wrap_to_pi(self.commands[:, 2])
+            self.delta_yaw = wrap_to_pi(self.target_yaw - self.yaw)
+            self.delta_next_yaw = self.delta_yaw
+        else:
             self.delta_yaw = self.target_yaw - self.yaw
             self.delta_next_yaw = self.next_target_yaw - self.yaw
 
@@ -420,7 +429,7 @@ class LeggedRobot(BaseTask):
                             imu_obs,    #[1,2]
                             0*self.delta_yaw[:, None], 
                             self.delta_yaw[:, None],
-                            self.delta_next_yaw[:, None],
+                            0*self.delta_next_yaw[:, None],
                             0*self.commands[:, 0:2], 
                             self.commands[:, 0:1],  #[1,1]
                             (self.env_class != 17).float()[:, None], 
@@ -501,6 +510,12 @@ class LeggedRobot(BaseTask):
         cam_target = gymapi.Vec3(lookat[0], lookat[1], lookat[2])
         self.gym.viewer_camera_look_at(self.viewer, None, cam_pos, cam_target)
 
+    def set_curriculum_metric(self, value):
+        self.curriculum_metric_smooth = (
+                                        self.curriculum_update_alpha * value + 
+                                        (1 - self.curriculum_update_alpha) * self.curriculum_metric_smooth )
+        self.curriculum_metric = value
+
     #------------- Callbacks --------------
     def _process_rigid_shape_props(self, props, env_id):
         """ Callback allowing to store/change/randomize the rigid shape properties of each environment.
@@ -579,11 +594,11 @@ class LeggedRobot(BaseTask):
         env_ids = (self.episode_length_buf % int(self.cfg.commands.resampling_time / self.dt)==0)
         self._resample_commands(env_ids.nonzero(as_tuple=False).flatten())
 
-        if self.cfg.commands.heading_command:
-            forward = quat_apply(self.base_quat, self.forward_vec)
-            heading = torch.atan2(forward[:, 1], forward[:, 0])
-            self.commands[:, 2] = torch.clip(0.8*wrap_to_pi(self.commands[:, 3] - heading), -1., 1.)
-            self.commands[:, 2] *= torch.abs(self.commands[:, 2]) > self.cfg.commands.ang_vel_clip
+        # if self.cfg.commands.heading_command:
+        #     forward = quat_apply(self.base_quat, self.forward_vec)
+        #     heading = torch.atan2(forward[:, 1], forward[:, 0])
+        #     self.commands[:, 2] = torch.clip(0.8*wrap_to_pi(self.commands[:, 3] - heading), -1., 1.)
+        #     self.commands[:, 2] *= torch.abs(self.commands[:, 2]) > self.cfg.commands.ang_vel_clip
         
         if self.cfg.terrain.measure_heights:
             if self.global_counter % self.cfg.depth.update_interval == 0:
@@ -601,11 +616,10 @@ class LeggedRobot(BaseTask):
             env_ids (List[int]): Environments ids for which new commands are needed
         """
         self.commands[env_ids, 0] = torch_rand_float(self.command_ranges["lin_vel_x"][0], self.command_ranges["lin_vel_x"][1], (len(env_ids), 1), device=self.device).squeeze(1)
-        if self.cfg.commands.heading_command:
-            self.commands[env_ids, 3] = torch_rand_float(self.command_ranges["heading"][0], self.command_ranges["heading"][1], (len(env_ids), 1), device=self.device).squeeze(1)
-        else:
-            self.commands[env_ids, 2] = torch_rand_float(self.command_ranges["ang_vel_yaw"][0], self.command_ranges["ang_vel_yaw"][1], (len(env_ids), 1), device=self.device).squeeze(1)
-            self.commands[env_ids, 2] *= torch.abs(self.commands[env_ids, 2]) > self.cfg.commands.ang_vel_clip
+        # if self.cfg.commands.heading_command:
+        #     self.commands[env_ids, 3] = torch_rand_float(self.command_ranges["heading"][0], self.command_ranges["heading"][1], (len(env_ids), 1), device=self.device).squeeze(1)
+        self.commands[env_ids, 2] = torch_rand_float(self.command_ranges["ang_yaw"][0], self.command_ranges["ang_yaw"][1], (len(env_ids), 1), device=self.device).squeeze(1)
+        self.commands[env_ids, 2] *= torch.abs(self.commands[env_ids, 2]) > self.cfg.commands.ang_vel_clip
 
         # set small commands to zero
         self.commands[env_ids, :2] *= torch.abs(self.commands[env_ids, 0:1]) > self.cfg.commands.lin_vel_clip
@@ -705,7 +719,7 @@ class LeggedRobot(BaseTask):
         
         dis_to_origin = torch.norm(self.root_states[env_ids, :2] - self.env_origins[env_ids, :2], dim=1)
         threshold = self.commands[env_ids, 0] * self.cfg.env.episode_length_s
-        move_up =dis_to_origin > 0.8*threshold
+        move_up = dis_to_origin > 0.8*threshold
         move_down = dis_to_origin < 0.4*threshold
 
         self.terrain_levels[env_ids] += 1 * move_up - 1 * move_down
@@ -1293,24 +1307,19 @@ class LeggedRobot(BaseTask):
         rew = torch.minimum(torch.sum(target_vec_norm * cur_vel, dim=-1), self.commands[:, 0]) / (self.commands[:, 0] + 1e-5)
         return rew
         
-    # def _reward_tracking_lin_vel_x(self):
-    #    cur_lin_vel_x = self.base_lin_vel[:, 0]
-    #    target_lin_vel_x = self.commands[:, 0]
-    #    rew = torch.exp(-torch.square(cur_lin_vel_x - target_lin_vel_x))
-    #    # rew = 1.0 - torch.abs(cur_lin_vel_x - target_lin_vel_x)
-    #    return rew
-
     def _reward_tracking_lin_vel_x(self):
         cur_lin_vel_x = self.base_lin_vel[:, 0]
         target_lin_vel_x = self.commands[:, 0]
         error = cur_lin_vel_x - target_lin_vel_x
-        rew = -torch.square(error)
-        # when the target velocity is close to zero, penalize not stopping more
+        rew = torch.exp(-torch.square(error))
         stop_mask = (torch.abs(target_lin_vel_x) < 0.1)
         rew[stop_mask] *= 2.0
-
         return rew
 
+    def _reward_tracking_lin_vel(self):
+        # Tracking of linear velocity commands (xy axes)
+        lin_vel_error = torch.sum(torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1)
+        return torch.exp(-lin_vel_error/self.cfg.rewards.tracking_sigma)
 
     def _reward_tracking_yaw(self):
         rew = torch.exp(-torch.abs(self.target_yaw - self.yaw))
@@ -1366,3 +1375,13 @@ class LeggedRobot(BaseTask):
         self.feet_at_edge = self.contact_filt & feet_at_edge
         rew = (self.terrain_levels > 3) * torch.sum(self.feet_at_edge, dim=-1)
         return rew
+
+    def _reward_termination(self):
+        # Terminal reward / penalty
+        return self.reset_buf * ~self.time_out_buf
+    
+    def _reward_stand_still(self):
+        # Penalize motion at zero commands
+        return torch.sum(torch.abs(self.dof_pos - self.default_dof_pos), dim=1) \
+            * (torch.norm(self.commands[:, :2], dim=1) < 0.1) \
+            * (torch.abs(self.commands[:, 2]) < 0.2)

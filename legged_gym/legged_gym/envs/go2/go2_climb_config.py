@@ -71,8 +71,16 @@ class Go2ClimbCfg( LeggedRobotCfg ):
         soft_dof_pos_limit = 0.9
         base_height_target = 0.25
         class scales( LeggedRobotCfg.rewards.scales ):
-            tracking_lin_vel_x = 1.5
-            tracking_goal_vel = 0
+            tracking_lin_vel = 0.
+            tracking_goal_vel = 1.5
+
+    class commands( LeggedRobotCfg.commands ):
+        heading_command = False
+        curriculum = False
+        class max_ranges( LeggedRobotCfg.commands.max_ranges ):
+            lin_vel_x = [0.3, 0.8]  # [m/s]
+            # lin_vel_x = [-0.2, 1.0]  # [m/s]
+            lin_vel_y = [0.0, 0.0]  # [m/s]
 
     class depth( LeggedRobotCfg.depth ):
         # position = [0.32, 0.0, 0.035]  # front camera
@@ -105,9 +113,9 @@ class Go2ClimbCfg( LeggedRobotCfg ):
                         "large stairs up": 0.,
                         "large stairs down": 0.,
                         "parkour": 0.,
-                        "parkour_hurdle": 0.25,
-                        "parkour_flat": 0.25,
-                        "parkour_step": 0.25,
+                        "parkour_hurdle": 0.4,
+                        "parkour_flat": 0.2,
+                        "parkour_step": 0.4,
                         "parkour_gap": 0.,
                         "demo": 0.,}
         terrain_proportions = list(terrain_dict.values())
