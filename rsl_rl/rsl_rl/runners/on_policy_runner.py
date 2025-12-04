@@ -83,7 +83,8 @@ class OnPolicyRunner:
                                                     self.policy_cfg["scan_encoder_dims"][-1], 
                                                     self.depth_encoder_cfg["hidden_dims"],
                                                     )
-            depth_encoder = RecurrentDepthBackbone(depth_backbone, env.cfg).to(self.device)
+            # depth_encoder = RecurrentDepthBackbone(depth_backbone, env.cfg, self.policy_cfg).to(self.device)
+            depth_encoder = GatedRecurrentBelief(depth_backbone, env.cfg, self.policy_cfg, belief_dim=32).to(self.device)
             depth_actor = deepcopy(actor_critic.actor)
         else:
             depth_encoder = None
@@ -168,7 +169,7 @@ class OnPolicyRunner:
                     critic_obs = privileged_obs if privileged_obs is not None else obs
                     obs, critic_obs, rewards, dones = obs.to(self.device), critic_obs.to(self.device), rewards.to(self.device), dones.to(self.device)
                     total_rew = self.alg.process_env_step(rewards, dones, infos)
-                    
+
                     if self.log_dir is not None:
                         # Book keeping
                         if 'episode' in infos:
@@ -241,6 +242,8 @@ class OnPolicyRunner:
         for it in range(self.current_learning_iteration, tot_iter):
             start = time.time()
             depth_latent_buffer = []
+            recon_buffer = []
+            scandots_buffer = []
             scandots_latent_buffer = []
             actions_teacher_buffer = []
             actions_student_buffer = []
@@ -252,20 +255,19 @@ class OnPolicyRunner:
                     with torch.no_grad():
                         scandots_latent = self.alg.actor_critic.actor.infer_scandots_latent(obs)
                     scandots_latent_buffer.append(scandots_latent)
+                    scandots_buffer.append(obs[:, self.env.cfg.env.n_proprio : self.env.cfg.env.n_proprio + self.env.cfg.env.n_scan])
                     obs_prop_depth = obs[:, :self.env.cfg.env.n_proprio].clone()
-                    # if 'go2' in self.cfg["experiment_name"]:
-                    #     # For go2 mask the info about feet
-                    #     n_proprio = int(self.env.cfg.env.n_proprio)
-                    #     feet_len = 4
-                    #     obs_prop_depth[:, n_proprio-feet_len : n_proprio] = 0
                     obs_prop_depth[:, 6:8] = 0
-                    depth_latent_and_yaw = self.alg.depth_encoder(infos["depth"].clone(), obs_prop_depth)  # clone is crucial to avoid in-place operation
-                    
-                    depth_latent = depth_latent_and_yaw[:, :-2]
+                    # depth_latent_and_yaw = self.alg.depth_encoder(infos["depth"].clone(), obs_prop_depth)  # clone is crucial to avoid in-place operation
+                    # depth_latent = depth_latent_and_yaw[:, :-2]
+                    depth_out = self.alg.depth_encoder(infos["depth"].clone(), obs_prop_depth)  # dict: {"belief","recon_extero",...}
+                    depth_latent = depth_out["belief"]
+                    depth_recon = depth_out["recon_extero"]
                     yaw = obs[:, 6:8]
                     # yaw = 1.5*depth_latent_and_yaw[:, -2:]
                     
                     depth_latent_buffer.append(depth_latent)
+                    recon_buffer.append(depth_recon)
                     yaw_buffer_student.append(yaw)
                     yaw_buffer_teacher.append(obs[:, 6:8])
                 
@@ -274,17 +276,6 @@ class OnPolicyRunner:
                     actions_teacher_buffer.append(actions_teacher)
 
                 obs_student = obs.clone()
-                # if 'go2' in self.cfg["experiment_name"]:
-                #     # For go2 mask the info about feet
-                #     feet_mask = torch.ones(self.env.cfg.env.num_observations, dtype=torch.bool)
-                #     feet_mask[self.env.cfg.env.n_proprio-4 : self.env.cfg.env.n_proprio] = False # feet: 4
-                #     num_obs_now = self.env.cfg.env.n_proprio + self.env.cfg.env.n_scan + self.env.cfg.env.n_priv + self.env.cfg.env.n_priv_latent # 53 + 132 + 9 + 29 = 223
-                #     for i in range(self.env.cfg.env.history_len):
-                #         # mask feet_conflict in history proprio
-                #         index_start = num_obs_now + i * self.env.cfg.env.n_proprio + self.env.cfg.env.n_proprio-4
-                #         index_end = num_obs_now + i * self.env.cfg.env.n_proprio + self.env.cfg.env.n_proprio
-                #         feet_mask[index_start:index_end] = False
-                #     obs_student[:, ~feet_mask] = 0.0
 
                 ### use origin delta yaw
                 # obs_student[:, 6:8] = yaw.detach()
@@ -318,17 +309,35 @@ class OnPolicyRunner:
             start = stop
 
             delta_yaw_ok_percentage = sum(delta_yaw_ok_buffer) / len(delta_yaw_ok_buffer)
-            scandots_latent_buffer = torch.cat(scandots_latent_buffer, dim=0)
-            depth_latent_buffer = torch.cat(depth_latent_buffer, dim=0)
+            scandots_latent_batch = torch.cat(scandots_latent_buffer, dim=0)
+            scandots_batch = torch.cat(scandots_buffer, dim=0)
+            depth_latent_batch = torch.cat(depth_latent_buffer, dim=0)
+            recon_batch = torch.cat(recon_buffer, dim=0)
             depth_encoder_loss = 0
+            if len(recon_buffer) > 0:
+                recon_to_draw = recon_batch.detach().cpu()
+                # use extras dict
+                self.env.extras = getattr(self.env, "extras", {})
+                self.env.extras["recon_heights"] = recon_to_draw
             # depth_encoder_loss = self.alg.update_depth_encoder(depth_latent_buffer, scandots_latent_buffer)
 
-            actions_teacher_buffer = torch.cat(actions_teacher_buffer, dim=0)
-            actions_student_buffer = torch.cat(actions_student_buffer, dim=0)
-            yaw_buffer_student = torch.cat(yaw_buffer_student, dim=0)
-            yaw_buffer_teacher = torch.cat(yaw_buffer_teacher, dim=0)
-            depth_actor_loss, yaw_loss = self.alg.update_depth_actor(actions_student_buffer, actions_teacher_buffer, yaw_buffer_student, yaw_buffer_teacher)
-
+            actions_teacher_batch = torch.cat(actions_teacher_buffer, dim=0)
+            actions_student_batch = torch.cat(actions_student_buffer, dim=0)
+            yaw_batch_student = torch.cat(yaw_buffer_student, dim=0)
+            yaw_batch_teacher = torch.cat(yaw_buffer_teacher, dim=0)
+            # recon_loss, action_loss, total_loss, task_weights, loss_ema = self.alg.update_belief_actor(
+            #     scandots_batch,
+            #     actions_student_batch=actions_student_batch,
+            #     actions_teacher_batch=actions_teacher_batch,
+            #     recon_batch=recon_batch
+            # )
+            recon_loss, action_loss, total_loss, _, loss_ema = self.alg.update_belief_actor_ema(
+                scandots_batch,
+                actions_student_batch=actions_student_batch,
+                actions_teacher_batch=actions_teacher_batch,
+                recon_batch=recon_batch
+            )
+            # depth_actor_loss, yaw_loss = self.alg.update_depth_actor(actions_student_batch, actions_teacher_batch, yaw_batch_student, yaw_batch_teacher)
             # depth_encoder_loss, depth_actor_loss = self.alg.update_depth_both(depth_latent_buffer, scandots_latent_buffer, actions_student_buffer, actions_teacher_buffer)
             stop = time.time()
             learn_time = stop - start
@@ -366,10 +375,26 @@ class OnPolicyRunner:
         mean_std = self.alg.actor_critic.std.mean()
         fps = int(self.num_steps_per_env * self.env.num_envs / (locs['collection_time'] + locs['learn_time']))
 
-        wandb_dict['Loss_depth/delta_yaw_ok_percent'] = locs['delta_yaw_ok_percentage']
-        wandb_dict['Loss_depth/depth_encoder'] = locs['depth_encoder_loss']
-        wandb_dict['Loss_depth/depth_actor'] = locs['depth_actor_loss']
-        wandb_dict['Loss_depth/yaw'] = locs['yaw_loss']
+        # belief encoder and depth_actor Loss
+        if 'task_weights' in locs and locs['task_weights'] is not None:
+            tw = locs['task_weights']
+            if isinstance(tw, torch.Tensor):
+                tw_np = tw.detach().cpu().numpy()
+            else:
+                tw_np = tw
+            wandb_dict['Loss_belief/weight_recon'] = float(tw_np[0])
+            wandb_dict['Loss_belief/weight_action'] = float(tw_np[1])
+        ema = locs['loss_ema']
+        wandb_dict['Loss_belief/recon_loss'] = locs['recon_loss']
+        wandb_dict['Loss_belief/action_loss'] = locs['action_loss']
+        wandb_dict['Loss_belief/total_loss'] = locs['total_loss']
+        wandb_dict['Loss_belief/ema_recon'] = float(ema['recon'])
+        wandb_dict['Loss_belief/ema_action'] = float(ema['action'])   
+        # wandb_dict['Loss_depth/delta_yaw_ok_percent'] = locs['delta_yaw_ok_percentage']
+        # wandb_dict['Loss_depth/depth_encoder'] = locs['depth_encoder_loss']
+        # wandb_dict['Loss_depth/depth_actor'] = locs['depth_actor_loss']
+        # wandb_dict['Loss_depth/yaw'] = locs['yaw_loss']
+
         wandb_dict['Policy/mean_noise_std'] = mean_std.item()
         wandb_dict['Perf/total_fps'] = fps
         wandb_dict['Perf/collection time'] = locs['collection_time']
@@ -390,9 +415,12 @@ class OnPolicyRunner:
                           f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
                           f"""{'Mean reward (total):':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
                           f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n"""
-                          f"""{'Depth encoder loss:':>{pad}} {locs['depth_encoder_loss']:.4f}\n"""
-                          f"""{'Depth actor loss:':>{pad}} {locs['depth_actor_loss']:.4f}\n"""
-                          f"""{'Yaw loss:':>{pad}} {locs['yaw_loss']:.4f}\n"""
+                          f"""{'Reconstruction Loss:':>{pad}} {locs['recon_loss']:.4f}\n"""
+                          f"""{'Depth actor loss:':>{pad}} {locs['action_loss']:.4f}\n"""
+                          f"""{'Total belief loss:':>{pad}} {locs['total_loss']:.4f}\n"""
+                        #   f"""{'Depth encoder loss:':>{pad}} {locs['depth_encoder_loss']:.4f}\n"""
+                        #   f"""{'Depth actor loss:':>{pad}} {locs['depth_actor_loss']:.4f}\n"""
+                        #   f"""{'Yaw loss:':>{pad}} {locs['yaw_loss']:.4f}\n"""
                           f"""{'Delta yaw ok percentage:':>{pad}} {locs['delta_yaw_ok_percentage']:.4f}\n""")
         else:
             log_string = (f"""{'#' * width}\n""")

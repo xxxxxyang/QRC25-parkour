@@ -79,6 +79,10 @@ class Go2BaseCfg( LeggedRobotCfg ):
             tracking_lin_vel = 1.5
             stand_still = -0.2
             orientation = -1.5
+            feet_air_time = 1.0
+            lazy_stop = -1.0
+            dof_error = -0.1
+            base_height = -0.1
 
     class depth( LeggedRobotCfg.depth ):
         # position = [0.32, 0.0, 0.035]  # front camera
@@ -123,15 +127,14 @@ class Go2BaseCfg( LeggedRobotCfg ):
         terrain_proportions = list(terrain_dict.values())
 
     class commands( LeggedRobotCfg.commands ):
-        heading_command = False
+        heading_command = True
         curriculum = False
         class max_ranges( LeggedRobotCfg.commands.max_ranges ):
             # lin_vel_x = [0.3, 0.8]  # [m/s]
-            lin_vel_x = [-0.5, 1.0]  # [m/s]
-            # lin_vel_x = [-0.5, 2.0]  # [m/s]
+            lin_vel_x = [-1.0, 1.5]  # [m/s]
             lin_vel_y = [0.0, 0.0]  # [m/s]
             ang_yaw = [-np.pi, np.pi]  # [rad]
-            delta_yaw_threhold = np.pi # [rad] clip  (ang_yaw/command_yaw - cur_yaw) to this range
+            delta_yaw_threhold = 0.5 # [rad] clip  (ang_yaw/command_yaw - cur_yaw) to this range
 
     class domain_rand( LeggedRobotCfg.domain_rand ):
         randomize_friction = True

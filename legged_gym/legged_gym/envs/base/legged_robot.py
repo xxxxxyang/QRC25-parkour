@@ -49,6 +49,7 @@ from legged_gym.utils.helpers import class_to_dict
 from legged_gym.utils.gamepad_reader import Gamepad
 from scipy.spatial.transform import Rotation as R
 from .legged_robot_config import LeggedRobotCfg
+from legged_gym.envs.base.depth_noise import DepthNoiseManager
 
 from tqdm import tqdm
 import cv2
@@ -116,6 +117,7 @@ class LeggedRobot(BaseTask):
             self.command_function = self.gamepad.get_command
             print("Gamepad control enabled")
 
+        self.noise_manager = DepthNoiseManager(self.cfg, self.device)
         self.reset_idx(torch.arange(self.num_envs, device=self.device))
         self.post_physics_step()
 
@@ -165,12 +167,12 @@ class LeggedRobot(BaseTask):
 
     def get_history_observations(self):
         return self.obs_history_buf
-    
+
     def normalize_depth_image(self, depth_image):
         depth_image = depth_image * -1
         depth_image = (depth_image - self.cfg.depth.near_clip) / (self.cfg.depth.far_clip - self.cfg.depth.near_clip)  - 0.5
         return depth_image
-    
+
     def process_depth_image(self, depth_image, env_id):
         # These operations are replicated on the hardware
         depth_image = self.crop_depth_image(depth_image)
@@ -179,6 +181,18 @@ class LeggedRobot(BaseTask):
         depth_image = self.resize_transform(depth_image[None, :]).squeeze()
         depth_image = self.normalize_depth_image(depth_image)
         # print("Processed Depth Image: ", depth_image)
+        return depth_image
+
+    def process_noise_depth_image(self, depth_image, env_id):
+        depth_image = self.crop_depth_image(depth_image)
+        depth_image += self.cfg.depth.dis_noise * 2 * (torch.rand(1)-0.5)[0]
+        depth_image = torch.clip(depth_image, -self.cfg.depth.far_clip, -self.cfg.depth.near_clip)
+        depth_image = self.resize_transform(depth_image[None, :]).squeeze()
+        # 把当前 env 的 depth_buffer 传进去
+        depth_buf = self.depth_buffer[env_id]
+        csk = self.global_counter
+        depth_image = self.noise_manager.add_noise(depth_image, depth_buf, csk)
+        depth_image = self.normalize_depth_image(depth_image)
         return depth_image
 
     def crop_depth_image(self, depth_image):
@@ -200,14 +214,15 @@ class LeggedRobot(BaseTask):
                                                                 self.envs[i], 
                                                                 self.cam_handles[i],
                                                                 gymapi.IMAGE_DEPTH)
-            
             depth_image = gymtorch.wrap_tensor(depth_image_)
             # print("Raw Depth Image: ", depth_image)
-            depth_image = self.process_depth_image(depth_image, i)
+            depth_image_clean = self.process_depth_image(depth_image, i)
+            depth_image = self.process_noise_depth_image(depth_image, i)
 
             init_flag = self.episode_length_buf <= 1
             if init_flag[i]:
                 self.depth_buffer[i] = torch.stack([depth_image] * self.cfg.depth.buffer_len, dim=0)
+                self.noise_manager.sample_mapping_condition()
             else:
                 self.depth_buffer[i] = torch.cat([self.depth_buffer[i, 1:], depth_image.to(self.device).unsqueeze(0)], dim=0)
 
@@ -227,7 +242,15 @@ class LeggedRobot(BaseTask):
         norm = torch.norm(self.target_pos_rel, dim=-1, keepdim=True)
         target_vec_norm = self.target_pos_rel / (norm + 1e-5)
         if self.cfg.commands.heading_command:
-            self.target_yaw = wrap_to_pi(self.commands[:, 2]) # use command as target yaw
+             # 原始目标 yaw（命令中给定的绝对朝向）
+            target_yaw_raw = wrap_to_pi(self.commands[:, 2])
+            # 计算与当前 yaw 的差
+            delta_yaw = wrap_to_pi(target_yaw_raw - self.yaw)
+            # 限制 yaw 变化量在 ±delta_yaw_threshold
+            delta_yaw_threshold = self.command_ranges['delta_yaw_threshold']
+            delta_yaw_clamped = torch.clamp(delta_yaw, -delta_yaw_threshold, delta_yaw_threshold)
+            # 得到平滑的目标 yaw
+            self.target_yaw = wrap_to_pi(self.yaw + delta_yaw_clamped)
         else:
             self.target_yaw = torch.atan2(target_vec_norm[:, 1], target_vec_norm[:, 0])
         
@@ -259,6 +282,7 @@ class LeggedRobot(BaseTask):
         self.roll, self.pitch, self.yaw = euler_from_quaternion(self.base_quat)
 
         contact = torch.norm(self.contact_forces[:, self.feet_indices], dim=-1) > 2.
+        self.last_contact_forces[:] = self.contact_forces
         self.contact_filt = torch.logical_or(contact, self.last_contacts) 
         self.last_contacts = contact
         
@@ -421,8 +445,8 @@ class LeggedRobot(BaseTask):
             self.delta_yaw = wrap_to_pi(self.target_yaw - self.yaw)
             self.delta_next_yaw = self.delta_yaw
         else:
-            self.delta_yaw = self.target_yaw - self.yaw
-            self.delta_next_yaw = self.next_target_yaw - self.yaw
+            self.delta_yaw = wrap_to_pi(self.target_yaw - self.yaw)
+            self.delta_next_yaw = wrap_to_pi(self.next_target_yaw - self.yaw)
 
         obs_buf = torch.cat((#skill_vector, 
                             self.base_ang_vel  * self.obs_scales.ang_vel,   #[1,3]
@@ -590,15 +614,20 @@ class LeggedRobot(BaseTask):
         """ Callback called before computing terminations, rewards, and observations
             Default behaviour: Compute ang vel command based on target and heading, compute measured terrain heights and randomly push robots
         """
-        # 
-        env_ids = (self.episode_length_buf % int(self.cfg.commands.resampling_time / self.dt)==0)
-        self._resample_commands(env_ids.nonzero(as_tuple=False).flatten())
-
-        # if self.cfg.commands.heading_command:
-        #     forward = quat_apply(self.base_quat, self.forward_vec)
-        #     heading = torch.atan2(forward[:, 1], forward[:, 0])
-        #     self.commands[:, 2] = torch.clip(0.8*wrap_to_pi(self.commands[:, 3] - heading), -1., 1.)
-        #     self.commands[:, 2] *= torch.abs(self.commands[:, 2]) > self.cfg.commands.ang_vel_clip
+        if self.cfg.commands.heading_command:
+            # 当使用heading_command时，使用更低的频率更新yaw命令
+            env_ids_lin = (self.episode_length_buf % int(self.cfg.commands.resampling_time / self.dt) == 0)
+            lin_envs = env_ids_lin.nonzero(as_tuple=False).flatten()
+            if len(lin_envs) > 0:
+                self._resample_lin_commands(lin_envs)
+            env_ids_yaw = (self.episode_length_buf % int(self.cfg.commands.heading_resampling_time / self.dt) == 0)
+            yaw_envs = env_ids_yaw.nonzero(as_tuple=False).flatten()
+            if len(yaw_envs) > 0:
+                self._resample_yaw_commands(yaw_envs)
+        else:
+            # 否则按照resampling_time的频率一起更新线速度和yaw命令
+            env_ids = (self.episode_length_buf % int(self.cfg.commands.resampling_time / self.dt)==0)
+            self._resample_commands(env_ids.nonzero(as_tuple=False).flatten())
         
         if self.cfg.terrain.measure_heights:
             if self.global_counter % self.cfg.depth.update_interval == 0:
@@ -611,18 +640,39 @@ class LeggedRobot(BaseTask):
 
     def _resample_commands(self, env_ids):
         """ Randommly select commands of some environments
-
         Args:
             env_ids (List[int]): Environments ids for which new commands are needed
         """
         self.commands[env_ids, 0] = torch_rand_float(self.command_ranges["lin_vel_x"][0], self.command_ranges["lin_vel_x"][1], (len(env_ids), 1), device=self.device).squeeze(1)
-        # if self.cfg.commands.heading_command:
-        #     self.commands[env_ids, 3] = torch_rand_float(self.command_ranges["heading"][0], self.command_ranges["heading"][1], (len(env_ids), 1), device=self.device).squeeze(1)
         self.commands[env_ids, 2] = torch_rand_float(self.command_ranges["ang_yaw"][0], self.command_ranges["ang_yaw"][1], (len(env_ids), 1), device=self.device).squeeze(1)
-        self.commands[env_ids, 2] *= torch.abs(self.commands[env_ids, 2]) > self.cfg.commands.ang_vel_clip
-
+        self.commands[env_ids, 2] *= torch.abs(self.commands[env_ids, 2]) > self.cfg.commands.ang_yaw_clip
         # set small commands to zero
         self.commands[env_ids, :2] *= torch.abs(self.commands[env_ids, 0:1]) > self.cfg.commands.lin_vel_clip
+
+    def _resample_lin_commands(self, env_ids):
+        """Resample linear velocity commands (vx, vy)"""
+        self.commands[env_ids, 0] = torch_rand_float(
+            self.command_ranges["lin_vel_x"][0], self.command_ranges["lin_vel_x"][1],
+            (len(env_ids), 1), device=self.device
+        ).squeeze(1)
+        self.commands[env_ids, 1] = torch_rand_float(
+            self.command_ranges["lin_vel_y"][0], self.command_ranges["lin_vel_y"][1],
+            (len(env_ids), 1), device=self.device
+        ).squeeze(1)
+        # set small commands to zero
+        self.commands[env_ids, :2] *= torch.abs(self.commands[env_ids, 0:1]) > self.cfg.commands.lin_vel_clip
+
+    def _resample_yaw_commands(self, env_ids):
+        """Resample yaw (angular velocity) commands"""
+        # 使用相对yaw角速度命令
+        self.commands[env_ids, 2] = torch_rand_float(
+            self.command_ranges["ang_yaw"][0],
+            self.command_ranges["ang_yaw"][1],
+            (len(env_ids), 1),
+            device=self.device
+        ).squeeze(1)
+        # set small commands to zero
+        self.commands[env_ids, 2] *= torch.abs(self.commands[env_ids, 2]) > self.cfg.commands.ang_yaw_clip
 
     def _compute_torques(self, actions):
         """ Compute torques from actions.
@@ -791,6 +841,7 @@ class LeggedRobot(BaseTask):
         self.commands_scale = torch.tensor([self.obs_scales.lin_vel, self.obs_scales.lin_vel, self.obs_scales.ang_vel], device=self.device, requires_grad=False,) # TODO change this
         self.feet_air_time = torch.zeros(self.num_envs, self.feet_indices.shape[0], dtype=torch.float, device=self.device, requires_grad=False)
         self.last_contacts = torch.zeros(self.num_envs, len(self.feet_indices), dtype=torch.bool, device=self.device, requires_grad=False)
+        self.last_contact_forces = torch.zeros_like(self.contact_forces)
         self.base_lin_vel = quat_rotate_inverse(self.base_quat, self.root_states[:, 7:10])
         self.base_ang_vel = quat_rotate_inverse(self.base_quat, self.root_states[:, 10:13])
         self.projected_gravity = quat_rotate_inverse(self.base_quat, self.gravity_vec)
@@ -1162,6 +1213,49 @@ class LeggedRobot(BaseTask):
             sphere_pose = gymapi.Transform(gymapi.Vec3(x, y, z), r=None)
             gymutil.draw_lines(sphere_geom, self.gym, self.viewer, self.envs[i], sphere_pose)
     
+    def _draw_reconstructed_height_samples(self, recon_heights=None, env_id=None):
+        """ Draw reconstructed height samples.
+            recon_heights: tensor (num_envs, num_height_points) or (num_height_points,)
+            If recon_heights is None, try to read self.extras["recon_heights"] or self.recon_heights.
+        """
+        if not self.terrain.cfg.measure_heights:
+            return
+        # try to obtain recon_heights from extras/attr when not provided
+        if recon_heights is None:
+            try:
+                recon_heights = self.extras.get("recon_heights", None)
+            except Exception:
+                recon_heights = getattr(self, "recon_heights", None)
+            if recon_heights is None:
+                return
+        # ensure tensor on cpu and torch.Tensor type
+        if isinstance(recon_heights, np.ndarray):
+            recon_heights = torch.from_numpy(recon_heights)
+        if isinstance(recon_heights, torch.Tensor):
+            recon_heights = recon_heights.cpu()
+        else:
+            return
+        # ensure tensors refreshed so base_quat/root_states are up-to-date
+        self.gym.refresh_rigid_body_state_tensor(self.sim)
+        sphere_geom = gymutil.WireframeSphereGeometry(0.02, 4, 4, None, color=(0, 1, 1))  # cyan for recon
+        i = self.lookat_id if env_id is None else env_id
+        base_pos = (self.root_states[i, :3]).cpu().numpy()
+        # determine per-env heights
+        # recon_heights shape can be (num_envs, num_points) or (num_points,)
+        if recon_heights.dim() == 1 or recon_heights.shape[0] == self.num_height_points:
+            heights = recon_heights.numpy()
+        else:
+            # recon_heights[i] -> (num_points,)
+            heights = recon_heights[i].numpy()
+        # same sampling points as original drawing
+        height_points = quat_apply_yaw(self.base_quat[i].repeat(heights.shape[0]), self.height_points[i]).cpu().numpy()
+        for j in range(heights.shape[0]):
+            x = height_points[j, 0] + base_pos[0]
+            y = height_points[j, 1] + base_pos[1]
+            z = float(heights[j])
+            sphere_pose = gymapi.Transform(gymapi.Vec3(x, y, z), r=None)
+            gymutil.draw_lines(sphere_geom, self.gym, self.viewer, self.envs[i], sphere_pose)
+
     def _draw_goals(self):
         sphere_geom = gymutil.WireframeSphereGeometry(0.1, 32, 32, None, color=(1, 0, 0))
         sphere_geom_cur = gymutil.WireframeSphereGeometry(0.1, 32, 32, None, color=(0, 0, 1))
@@ -1232,6 +1326,45 @@ class LeggedRobot(BaseTask):
             points[i, :, 0] = grid_x.flatten() + xy_noise[:, 0]
             points[i, :, 1] = grid_y.flatten() + xy_noise[:, 1]
         return points
+    
+    def _init_foot_height_points(self):
+        """
+        Create polar sampling points around each foot.
+        Returns foot_height_points of shape:
+            (num_envs, num_feet=4, num_points_per_foot, 3)
+        """
+        radii = torch.tensor(self.cfg.terrain.foot_scan_radii, device=self.device)
+        num_angles = self.cfg.terrain.foot_scan_num_angles
+        angles = torch.linspace(0, 2 * torch.pi, num_angles, device=self.device, endpoint=False)
+
+        # Polar → Cartesian
+        # For each radius r and angle θ: (x=r*cosθ, y=r*sinθ)
+        all_xy = []
+        for r in radii:
+            x = r * torch.cos(angles)
+            y = r * torch.sin(angles)
+            xy = torch.stack([x, y], dim=-1)  # (num_angles, 2)
+            all_xy.append(xy)
+
+        # concat radii: shape = (num_radii * num_angles, 2)
+        all_xy = torch.cat(all_xy, dim=0)
+
+        num_points = all_xy.shape[0]
+        num_feet = self.num_feet  # e.g. 4 (FL, FR, RL, RR)
+
+        # Build full tensor
+        foot_height_points = torch.zeros(
+            (self.num_envs, num_feet, num_points, 3),
+            device=self.device,
+            requires_grad=False
+        )
+
+        # Fill xy for each env and each foot
+        foot_height_points[:, :, :, 0:2] = all_xy  # repeated automatically
+
+        self.num_foot_height_points = num_points
+        return foot_height_points
+
 
     def get_foot_contacts(self):
         foot_contacts_bool = self.contact_forces[:, self.feet_indices, 2] > 10
@@ -1252,6 +1385,7 @@ class LeggedRobot(BaseTask):
 
         Returns:
             [type]: [description]
+            (num_envs, num_height_points) or env_ids: (len(env_ids), num_height_points)
         """
         if self.cfg.terrain.mesh_type == 'plane':
             return torch.zeros(self.num_envs, self.num_height_points, device=self.device, requires_grad=False)
@@ -1277,6 +1411,57 @@ class LeggedRobot(BaseTask):
         heights = torch.min(heights, heights3)
 
         return heights.view(self.num_envs, -1) * self.terrain.cfg.vertical_scale
+
+    def _get_foot_heights(self, env_ids=None):
+        """
+        Sample height values at the polar grid around each foot.
+        Returns shape:
+            (num_envs, num_feet, num_points_per_foot)
+        """
+        if self.cfg.terrain.mesh_type == 'plane':
+            return torch.zeros(
+                (self.num_envs, self.num_feet, self.num_foot_height_points),
+                device=self.device
+            )
+
+        # Select envs
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device)
+
+        # (num_envs, num_feet, num_points, 3)
+        rel_points = self.foot_height_points[env_ids]  
+
+        # Add each foot's world position
+        # foot_positions: (num_envs, num_feet, 3)
+        foot_world = self.foot_positions[env_ids].unsqueeze(2)  # → (env, feet, 1, 3)
+        points = rel_points + foot_world
+
+        # If you want to rotate based on foot yaw or base yaw (可选)
+        # Example using base yaw:
+        points = quat_apply_yaw(
+            self.base_quat[env_ids].unsqueeze(1).unsqueeze(1).repeat(1, self.num_feet, self.num_foot_height_points, 1),
+            points
+        )
+
+        # Add border
+        points += self.terrain.cfg.border_size
+
+        # Project into heightmap index
+        px = (points[:, :, :, 0] / self.terrain.cfg.horizontal_scale).long()
+        py = (points[:, :, :, 1] / self.terrain.cfg.horizontal_scale).long()
+
+        px = torch.clip(px, 0, self.height_samples.shape[0] - 2)
+        py = torch.clip(py, 0, self.height_samples.shape[1] - 2)
+
+        # Bilinear-like min sampling (matching your original code)
+        h1 = self.height_samples[px, py]
+        h2 = self.height_samples[px + 1, py]
+        h3 = self.height_samples[px, py + 1]
+
+        h = torch.min(torch.min(h1, h2), h3)  # (env, feet, points)
+
+        return h * self.terrain.cfg.vertical_scale
+
 
     def _get_heights_points(self, coords, env_ids=None):
         if env_ids:
@@ -1322,7 +1507,7 @@ class LeggedRobot(BaseTask):
         return torch.exp(-lin_vel_error/self.cfg.rewards.tracking_sigma)
 
     def _reward_tracking_yaw(self):
-        rew = torch.exp(-torch.abs(self.target_yaw - self.yaw))
+        rew = torch.exp(-torch.abs(wrap_to_pi(self.target_yaw - self.yaw)))
         return rew
     
     def _reward_lin_vel_z(self):
@@ -1385,3 +1570,29 @@ class LeggedRobot(BaseTask):
         return torch.sum(torch.abs(self.dof_pos - self.default_dof_pos), dim=1) \
             * (torch.norm(self.commands[:, :2], dim=1) < 0.1) \
             * (torch.abs(self.commands[:, 2]) < 0.2)
+    
+    def _reward_feet_air_time(self):
+        # Reward long steps
+        # Need to filter the contacts because the contact reporting of PhysX is unreliable on meshes
+        last_contact = self.last_contact_forces[:, self.feet_indices, 2] > 1.
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.
+        contact_filt = torch.logical_or(contact, last_contact) 
+        first_contact = (self.feet_air_time > 0.) * contact_filt
+        self.feet_air_time += self.dt
+        rew_airTime = torch.sum((self.feet_air_time - 0.5) * first_contact, dim=1) # reward only on first contact with the ground
+        rew_airTime *= torch.norm(self.commands[:, :2], dim=1) > 0.1 #no reward for zero command
+        self.feet_air_time *= ~contact_filt
+        return rew_airTime
+    
+    def _reward_lazy_stop(self):
+        # Penalize too slow when command is not below cutoff threshold
+        return (torch.norm(self.root_states[:, 7:9] - self.commands[:, :2], dim=1) > getattr(self.cfg.commands, "lin_cmd_cutoff", 0.2)) \
+            * torch.logical_or(
+                (torch.norm(self.commands[:, :2], dim=1) > getattr(self.cfg.commands, "lin_vel_clip", 0.2)),
+                (torch.abs(self.commands[:, 2]) > getattr(self.cfg.commands, "ang_yaw_clip", 0.1)),
+            )
+    
+    def _reward_base_height(self):
+        # Penalize base height away from target
+        base_height = torch.mean(self.root_states[:, 2].unsqueeze(1) - self.measured_heights, dim=1)
+        return torch.square(base_height - self.cfg.rewards.base_height_target)

@@ -130,6 +130,23 @@ class PPO:
             self.depth_actor = depth_actor
             self.depth_actor_optimizer = optim.Adam([*self.depth_actor.parameters(), *self.depth_encoder.parameters()], lr=depth_encoder_paras["learning_rate"])
 
+        # GradNorm
+        self.gradnorm_alpha = 0.5
+        self.task_weights = torch.nn.Parameter(torch.tensor([1.0, 1.0], device=self.device)) # initialize task weights for 2 tasks
+        self.task_weight_optimizer = torch.optim.Adam([self.task_weights], lr=1e-3)
+        self.initial_losses = None
+        self.gradnorm_shared_params = (
+                    list(self.depth_encoder.g_a.parameters()) +
+                    list(self.depth_encoder.g_b.parameters())
+                )
+        self.ema_decay = 0.99
+        self.loss_ema = {
+            "recon": None,
+            "action": None
+        }
+        # self.gradnorm_shared_params = [next(self.depth_encoder.parameters())]
+        # self.gradnorm_shared_params = list(self.depth_encoder.parameters())
+
     def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape):
         self.storage = RolloutStorage(num_envs, num_transitions_per_env, actor_obs_shape,  critic_obs_shape, action_shape, self.device)
 
@@ -321,7 +338,176 @@ class PPO:
             nn.utils.clip_grad_norm_(self.depth_encoder.parameters(), self.max_grad_norm)
             self.depth_encoder_optimizer.step()
             return depth_encoder_loss.item()
-    
+        
+    def update_belief_actor(self, scandots_batch, actions_student_batch=None, actions_teacher_batch=None, recon_batch=None):
+        if self.if_depth:
+            device = self.device
+            # Reconstruction loss
+            if recon_batch is not None and scandots_batch is not None:
+                recon_loss_raw = nn.functional.mse_loss(
+                    recon_batch,
+                    scandots_batch.detach()
+                )
+            else:
+                recon_loss_raw = torch.tensor(0.0, device=device)
+            # Action imitation loss
+            if actions_student_batch is not None and actions_teacher_batch is not None:
+                l2_per_sample = torch.norm(
+                    actions_student_batch - actions_teacher_batch.detach(),
+                    p=2,
+                    dim=-1
+                )
+                action_loss_raw = l2_per_sample.mean()
+            else:
+                action_loss_raw = torch.tensor(0.0, device=device)
+            # Task loss vector L = [L1, L2]
+            self._update_ema("recon", recon_loss_raw)
+            self._update_ema("action", action_loss_raw)
+            recon_loss = recon_loss_raw / (self.loss_ema["recon"] + 1e-8)
+            action_loss = action_loss_raw / (self.loss_ema["action"] + 1e-8)
+            L = torch.stack([recon_loss, action_loss])    # shape [2]
+            # Initialize reference losses (GradNorm)
+            if self.initial_losses is None:
+                # store a detached copy (no grad)
+                self.initial_losses = L.detach().clone()
+
+            # GradNorm: first compute G_i (gradient norms) with create_graph=True
+            # Expectation: self.gradnorm_shared_params is an iterable of tensors (shared params)
+            shared_params = self.gradnorm_shared_params
+            # Ensure shared_params is a tuple/list as required by autograd.grad
+            # Note: autograd.grad returns a tuple of grads corresponding to inputs
+            G_list = []
+            for i in range(L.numel()):  # two tasks
+                # compute grads of (w_i * L_i) wrt shared params; keep graph so we can backprop through these norms
+                # allow_unused=True in case some params do not contribute to this task (safer)
+                grads = torch.autograd.grad(
+                    outputs=(self.task_weights[i] * L[i]),
+                    inputs=shared_params,
+                    retain_graph=True,    # we will need the graph again later (safe to keep until shared update)
+                    create_graph=True,    # IMPORTANT: allow gradients of G_i w.r.t task_weights
+                    allow_unused=True
+                )
+
+                # grads may be tuple of tensors (or single tensor). compute flattened norm:
+                # replace None grads with zeros of appropriate shape
+                flat_grads = []
+                for g, p in zip(grads, shared_params):
+                    if g is None:
+                        # create zero tensor with same shape as param p, on same device
+                        flat_grads.append(torch.zeros_like(p).view(-1))
+                    else:
+                        flat_grads.append(g.contiguous().view(-1))
+                if len(flat_grads) == 0:
+                    # defensive: if no shared params (shouldn't happen), treat norm as zero
+                    g_norm = torch.tensor(0.0, device=device)
+                else:
+                    all_flat = torch.cat(flat_grads)
+                    g_norm = torch.norm(all_flat, p=2)
+                G_list.append(g_norm)
+
+            G = torch.stack(G_list)  # shape [K]
+            # detach G_avg used as scalar baseline for target; but keep G itself attached for gradnorm_loss backward
+            G_avg = G.mean().detach()
+
+            # Compute target gradient magnitudes target_G
+            # loss_ratio = L(t) / L(0)
+            loss_ratio = L.detach() / (self.initial_losses + 1e-12)
+            # normalized rates r_i
+            r_i = loss_ratio / (loss_ratio.mean() + 1e-12)
+            # target gradient magnitudes
+            target_G = G_avg * (r_i ** self.gradnorm_alpha)
+
+            # GradNorm loss and update task weights
+            # L_grad = sum_i |G_i - target_G_i|
+            gradnorm_loss = torch.abs(G - target_G).sum()
+
+            # update task weights (these should be optimized by self.task_weight_optimizer)
+            self.task_weight_optimizer.zero_grad()
+            gradnorm_loss.backward(retain_graph=True)
+            self.task_weight_optimizer.step()
+
+            # Prevent weights from diverging: normalize to sum K (K=number of tasks)
+            with torch.no_grad():
+                w = self.task_weights
+                K = float(L.numel())
+                # ensure positivity if desired (paper doesn't strictly enforce positivity but common to keep >0)
+                # Here we keep raw values but normalize their sum to K.
+                w_min, w_max = 0.5, 2.0   # clip
+                w[:] = torch.clamp(w, w_min, w_max)
+                w[:] = K * w / (w.sum() + 1e-12)
+
+            # Finally update encoder + actor using the (updated) task weights
+            weighted_loss = (self.task_weights * L).sum()
+            self.depth_actor_optimizer.zero_grad()
+            weighted_loss.backward()
+            # Clip gradients for encoder + actor
+            nn.utils.clip_grad_norm_(list(self.depth_encoder.parameters()) + list(self.depth_actor.parameters()), self.max_grad_norm)
+            self.depth_actor_optimizer.step()
+
+            # return scalar numbers
+            return recon_loss.item(), action_loss.item(), weighted_loss.item(), self.task_weights.detach().cpu().clone(), self.loss_ema
+        
+    def _update_ema(self, name, value):
+        v = value.detach()
+        if self.loss_ema[name] is None:
+            self.loss_ema[name] = v.clone()
+        else:
+            self.loss_ema[name] = (
+                self.ema_decay * self.loss_ema[name] +
+                (1 - self.ema_decay) * v
+            )
+
+    def update_belief_actor_ema(self, scandots_batch, actions_student_batch=None, actions_teacher_batch=None, recon_batch=None):
+        if self.if_depth:
+            device = self.device
+            # Reconstruction loss
+            if recon_batch is not None and scandots_batch is not None:
+                recon_loss_raw = nn.functional.mse_loss(
+                    recon_batch,
+                    scandots_batch.detach()
+                )
+            else:
+                recon_loss_raw = torch.tensor(0.0, device=device)
+            # Action imitation loss
+            if actions_student_batch is not None and actions_teacher_batch is not None:
+                l2_per_sample = torch.norm(
+                    actions_student_batch - actions_teacher_batch.detach(),
+                    p=2,
+                    dim=-1
+                )
+                action_loss_raw = l2_per_sample.mean()
+            else:
+                action_loss_raw = torch.tensor(0.0, device=device)
+
+            # Update EMA
+            self._update_ema("recon", recon_loss_raw)
+            self._update_ema("action", action_loss_raw)
+            # Normalized losses
+            recon_loss = recon_loss_raw / (self.loss_ema["recon"] + 1e-8)
+            action_loss = action_loss_raw / (self.loss_ema["action"] + 1e-8)
+            # final loss
+            weighted_loss = recon_loss + action_loss
+
+            # optimize
+            self.depth_actor_optimizer.zero_grad()
+            weighted_loss.backward()
+
+            nn.utils.clip_grad_norm_(
+                list(self.depth_encoder.parameters()) +
+                list(self.depth_actor.parameters()),
+                self.max_grad_norm
+            )
+
+            self.depth_actor_optimizer.step()
+
+            return (
+                recon_loss.item(),
+                action_loss.item(),
+                weighted_loss.item(),
+                None,                # no task weights
+                self.loss_ema.copy() # return your EMA
+            )
+
     def update_depth_actor(self, actions_student_batch, actions_teacher_batch, yaw_student_batch, yaw_teacher_batch):
         if self.if_depth:
             depth_actor_loss = (actions_teacher_batch.detach() - actions_student_batch).norm(p=2, dim=1).mean()

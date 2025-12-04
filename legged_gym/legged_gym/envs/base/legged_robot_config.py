@@ -44,7 +44,7 @@ class LeggedRobotCfg(BaseConfig):
         n_priv = 3 + 3 +3
         n_priv_latent = 4 + 1 + 12 +12
         # n_proprio = 3 + 2 + 3 + 4 + 36 + 5
-        n_proprio = 3 + 2 + 3 + 3 + 2 + 36 + 4 # base_ang_vel + imu + delta_yaw + commands + env_class + dof_pos + dof_vel + action_hist + feet
+        n_proprio = 3 + 2 + 3 + 3 + 2 + 36 + 4 # base_ang_vel + imu + delta_yaw + commands + env_class + dof_pos + dof_vel + action_hist + feet = 53
         history_len = 10
 
         num_observations = n_proprio + n_scan + n_priv + n_priv_latent + history_len*n_proprio # 53 + 132 + 9 + 29 + 10*53 = 753
@@ -107,7 +107,11 @@ class LeggedRobotCfg(BaseConfig):
         near_clip = 0
         far_clip = 2
         dis_noise = 0.0
-        
+        env_patch_min = 4
+        env_patch_max = 12
+        range_noise_sigma = 0.02
+        outlier_prob = 0.01
+
         scale = 1
         invert = True
 
@@ -162,6 +166,8 @@ class LeggedRobotCfg(BaseConfig):
         measure_heights = True
         measured_points_x = [-0.45, -0.3, -0.15, 0, 0.15, 0.3, 0.45, 0.6, 0.75, 0.9, 1.05, 1.2] # 1mx1.6m rectangle (without center line)
         measured_points_y = [-0.75, -0.6, -0.45, -0.3, -0.15, 0., 0.15, 0.3, 0.45, 0.6, 0.75]
+        foot_scan_radii = [0.05, 0.10, 0.15, 0.20]
+        foot_scan_num_angles = 8
         measure_horizontal_noise = 0.0
 
         selected = False # select a unique terrain type and pass all arguments
@@ -204,30 +210,31 @@ class LeggedRobotCfg(BaseConfig):
         curriculum = False
         max_curriculum = 1.
         num_commands = 4 # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
-        resampling_time = 6. # time before command are changed[s]
+        resampling_time = 10. # time before command are changed[s]
+        heading_resampling_time = 4*resampling_time # 如果使用heading_command, yaw command 的更新间隔 [s]
         heading_command = False # use command to calculate target yaw
         
-        lin_vel_clip = 0.2
-        ang_vel_clip = 0.4
+        lin_vel_clip = 0.1 # [m/s]
+        ang_yaw_clip = 0.05 # [rad]
         # Easy ranges
         class ranges:
             lin_vel_x = [0., 1.5] # min max [m/s]
             lin_vel_y = [0.0, 0.0]   # min max [m/s]
-            ang_yaw = [0, 0]    # min max [rad/s]
-            heading = [0, 0]
+            ang_yaw = [0, 0]    # min max [rad]
+            delta_yaw_threshold = 0.5  # [rad], only used in heading mode
 
-        # Easy ranges
+        # Hard ranges
         class max_ranges:
             lin_vel_x = [0.3, 0.8] # min max [m/s]
             lin_vel_y = [-0.3, 0.3]#[0.15, 0.6]   # min max [m/s]
-            ang_yaw = [-0, 0]    # min max [rad/s]
-            heading = [-1.6, 1.6]
+            ang_yaw = [-0, 0]    # min max [rad]
+            delta_yaw_threshold = 0.5  # [rad], only used in heading mode
 
         class crclm_incremnt:
             lin_vel_x = 0.1 # min max [m/s]
             lin_vel_y = 0.1  # min max [m/s]
-            ang_vel_yaw = 0.1    # min max [rad/s]
-            heading = 0.5
+            ang_yaw = 0.1    # min max [rad]
+            delta_yaw_threshold = 0.1  # [rad], only used in heading mode
 
         waypoint_delta = 0.7
 

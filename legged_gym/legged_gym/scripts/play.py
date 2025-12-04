@@ -117,7 +117,7 @@ def play(args):
     # prepare environment
     env: LeggedRobot
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
-    env.commands[:, 0] = 0.6
+    env.commands[:, 0] = 1.
     env.commands[:, 2] = 0.0
 
     # if no config.json in logdir
@@ -173,9 +173,12 @@ def play(args):
                 if infos["depth"] is not None:
                     obs_student = obs[:, :env.cfg.env.n_proprio].clone()
                     obs_student[:, 6:8] = 0
-                    depth_latent_and_yaw = depth_encoder(infos["depth"], obs_student)
-                    depth_latent = depth_latent_and_yaw[:, :-2]
-                    yaw = depth_latent_and_yaw[:, -2:]
+                    # depth_latent_and_yaw = depth_encoder(infos["depth"], obs_student)
+                    # depth_latent = depth_latent_and_yaw[:, :-2]
+                    # yaw = depth_latent_and_yaw[:, -2:]
+                    depth_out = depth_encoder(infos["depth"].clone(), obs_student)  # dict: {"belief","recon_extero",...}
+                    depth_latent = depth_out["belief"]
+                    depth_recon = depth_out["recon_extero"]
                 # obs[:, 6:8] = 1.5*yaw
                 # obs[:, 6:8] = 0*yaw
                     
