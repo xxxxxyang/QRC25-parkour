@@ -102,7 +102,7 @@ def play(args):
                                         "parkour_gap": 0., 
                                         "demo": 0.}
     env_cfg.terrain.terrain_proportions = list(env_cfg.terrain.terrain_dict.values())
-    env_cfg.terrain.curriculum = False
+    env_cfg.terrain.curriculum = True
     env_cfg.terrain.max_difficulty = True
     
     env_cfg.depth.angle = [0, 1]
@@ -117,8 +117,8 @@ def play(args):
     # prepare environment
     env: LeggedRobot
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
-    env.commands[:, 0] = 1.
-    env.commands[:, 2] = 0.0
+    # env.commands[:, 0] = 1.
+    # env.commands[:, 2] = 0.0
 
     # if no config.json in logdir
     cfg_path = os.path.join(log_pth, "config.json")
@@ -197,13 +197,16 @@ def play(args):
                         step_graphics=True,
                         render_all_camera_sensors=True,
                         wait_for_page_load=True)
-        print("time:", env.episode_length_buf[env.lookat_id].item() / 50, 
-              "cmd vx", env.commands[env.lookat_id, 0].item(),
-              "actual vx", env.base_lin_vel[env.lookat_id, 0].item(), 
-              "obs_yaw", obs.detach()[env.lookat_id, 6:8].cpu().tolist(), )
+        obs_yaw_str = ", ".join([f"{x:.2f}" for x in obs.detach()[env.lookat_id, 6:8].cpu().tolist()])
+        info_str = (
+            f"time {env.episode_length_buf[env.lookat_id].item() / 50:.2f} | "
+            f"cmd vx {env.commands[env.lookat_id, 0].item():.2f} vy {env.commands[env.lookat_id, 1].item():.2f} wz {env.commands[env.lookat_id, 2].item():.2f} | "
+            f"actual vx {env.base_lin_vel[env.lookat_id, 0].item():.2f} vy {env.base_lin_vel[env.lookat_id, 1].item():.2f} wz {env.base_ang_vel[env.lookat_id, 2].item():.2f} | "
+            #f"obs_yaw [{obs_yaw_str}]"
+        )
         if args.keyboard or args.joystick:
-            print("cmd yaw", env.commands[env.lookat_id, 2].item(),
-                    "actual yaw", env.yaw[env.lookat_id].item(),)
+            info_str += f" | cmd yaw {env.commands[env.lookat_id, 2].item():.2f} actual yaw {env.yaw[env.lookat_id].item():.2f}"
+        print(info_str, flush=True)
         
         id = env.lookat_id
         

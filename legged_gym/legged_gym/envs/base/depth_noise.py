@@ -53,28 +53,22 @@ class DepthNoiseManager:
         if self.mapping_condition != "offset":
             return depth_image
 
-        buf_len = buffer.shape[0]
-
-        # 1) 根据噪声强度决定触发概率
-        p_delay = min(1.0, 0.3 + noise_scale * 0.5)
-        if random.random() > p_delay:
+        if buffer.shape[0] < 2:
             return depth_image
-
-        # 2) 根据噪声大小决定最大延迟帧
-        max_delay = int(1 + noise_scale * 2)
-        max_delay = min(max_delay, buf_len - 1)
-
-        s_t = random.randint(0, max_delay)
-        delayed = buffer[-1 - s_t]
-
-        # 3) 噪声越大越偏向 delayed
+        # 噪声强度控制延迟的权重 w（越大越偏向旧帧 -2）
         w = min(1.0, 0.3 + noise_scale * 0.7)
-
-        # 邻帧插值平滑
-        x = torch.rand(1, device=self.device).item()
+        # 基于噪声强度的随机 jitter（控制闪烁幅度很小）
+        # x ∈ [0, jitter_max]，避免出现大跳变
+        jitter_max = min(0.2, 0.05 + noise_scale * 0.1)
+        x = random.random() * jitter_max
+        # 插值最近两帧：
+        # depth_image = buffer[-1]
+        # prev_frame  = buffer[-2]
         blended = (1 - x) * depth_image + x * buffer[-2]
+        # 最终混合（控制是否更加偏向旧帧）
+        out = (1 - w) * depth_image + w * blended
+        return out
 
-        return (1 - w) * blended + w * delayed
 
 
     # 环境噪声（patch degradation + jitter）
@@ -139,16 +133,10 @@ class DepthNoiseManager:
         return depth_noisy
 
     # 总入口：对深度图添加所有噪声
-    def add_noise(self, depth_image, csk):
-        """
-        流程：
-        1) delay（仅 offset）
-        2) environment noise（仅 noisy）
-        3) Gaussian + salt & pepper
-        """
+    def add_noise(self, depth_image, depth_buffer_for_env, csk):
         noise_scale = self.compute_intensity(csk)
 
-        depth_image = self.apply_delay(depth_image, noise_scale)
+        depth_image = self.apply_delay(depth_image, depth_buffer_for_env, noise_scale)
         depth_image = self.apply_environment_noise(depth_image, noise_scale)
         depth_image = self.apply_gaussian_and_saltpepper(depth_image, noise_scale)
 

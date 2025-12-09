@@ -72,7 +72,7 @@ class Go2ClimbCfg( LeggedRobotCfg ):
         base_height_target = 0.25
         class scales( LeggedRobotCfg.rewards.scales ):
             tracking_lin_vel = 0.
-            tracking_goal_vel = 1.5
+            # tracking_goal_vel = 1.5
             stand_still = -0.1
             orientation = -1.5
 

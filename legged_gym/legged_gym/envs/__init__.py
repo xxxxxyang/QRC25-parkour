@@ -62,3 +62,6 @@ from .go2.go2_base_config import Go2BaseCfg, Go2BaseCfgPPO
 task_registry.register( "base_go2", LeggedRobot, Go2BaseCfg(), Go2BaseCfgPPO() )
 from .go2.go2_stair_config import Go2StairCfg, Go2StairCfgPPO
 task_registry.register( "stair_go2", LeggedRobot, Go2StairCfg(), Go2StairCfgPPO() )
+
+from .go2.terrain_test_config import Go2TerrainTestCfg, Go2TerrainTestCfgPPO
+task_registry.register( "test", LeggedRobot, Go2TerrainTestCfg(), Go2TerrainTestCfgPPO() )

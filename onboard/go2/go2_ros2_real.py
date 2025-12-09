@@ -159,6 +159,7 @@ class Go2Ros2Real(Node):
         self.joy_stick_topic = joy_stick_topic
         self.depth_data_topic = depth_data_topic
         self.cfg = cfg
+        self.parse_config()
         self.lin_vel_deadband = lin_vel_deadband
         self.ang_vel_deadband = ang_vel_deadband
         self.cmd_px_range = cmd_px_range
@@ -190,7 +191,6 @@ class Go2Ros2Real(Node):
         self.contact_filt = torch.ones((1, 4), device= self.model_device, dtype= torch.float32)
         self.last_contact_filt = torch.ones((1, 4), device= self.model_device, dtype= torch.float32)
 
-        self.parse_config()
         self.init_stand_config()
 
     def init_stand_config(self):

@@ -39,6 +39,7 @@ class LeggedRobotCfg(BaseConfig):
         mask_priv_obs = False
     class env:
         num_envs = 6144
+        border_margin = 0.5         # 距物理边界的安全距离 [米]
 
         n_scan = 132
         n_priv = 3 + 3 +3
@@ -174,8 +175,8 @@ class LeggedRobotCfg(BaseConfig):
         terrain_kwargs = None # Dict of arguments for selected terrain
         max_init_terrain_level = 5 # starting curriculum state
         terrain_length = 18.
-        terrain_width = 4
-        num_rows= 10 # number of terrain rows (levels)  # spreaded is benifitiall !
+        terrain_width = 6
+        num_rows = 10 # number of terrain rows (levels)  # spreaded is benifitiall !
         num_cols = 40 # number of terrain cols (types)
         
         terrain_dict = {"smooth slope": 0., 
@@ -207,34 +208,32 @@ class LeggedRobotCfg(BaseConfig):
         num_goals = 8
 
     class commands:
-        curriculum = False
+        curriculum = True
         max_curriculum = 1.
         num_commands = 4 # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
         resampling_time = 10. # time before command are changed[s]
         heading_resampling_time = 4*resampling_time # 如果使用heading_command, yaw command 的更新间隔 [s]
         heading_command = False # use command to calculate target yaw
-        
+
+        # min command scale clip
         lin_vel_clip = 0.1 # [m/s]
-        ang_yaw_clip = 0.05 # [rad]
+        ang_vel_clip = 0.05 # [rad]
         # Easy ranges
         class ranges:
             lin_vel_x = [0., 1.5] # min max [m/s]
             lin_vel_y = [0.0, 0.0]   # min max [m/s]
-            ang_yaw = [0, 0]    # min max [rad]
-            delta_yaw_threshold = 0.5  # [rad], only used in heading mode
+            ang_vel_z = [0, 0]    # min max [rad]
 
         # Hard ranges
         class max_ranges:
-            lin_vel_x = [0.3, 0.8] # min max [m/s]
+            lin_vel_x = [-0.3, 1.8] # min max [m/s]
             lin_vel_y = [-0.3, 0.3]#[0.15, 0.6]   # min max [m/s]
-            ang_yaw = [-0, 0]    # min max [rad]
-            delta_yaw_threshold = 0.5  # [rad], only used in heading mode
+            ang_vel_z = [-1., 1.]    # min max [rad]
 
         class crclm_incremnt:
             lin_vel_x = 0.1 # min max [m/s]
             lin_vel_y = 0.1  # min max [m/s]
-            ang_yaw = 0.1    # min max [rad]
-            delta_yaw_threshold = 0.1  # [rad], only used in heading mode
+            ang_vel_z = 0.1    # min max [rad]
 
         waypoint_delta = 0.7
 
@@ -302,8 +301,10 @@ class LeggedRobotCfg(BaseConfig):
     class rewards:
         class scales:
             # tracking rewards
-            tracking_goal_vel = 1.5
-            tracking_yaw = 0.5
+            # tracking_goal_vel = 1.5
+            # tracking_yaw = 0.5
+            tracking_lin_vel = 1.5
+            tracking_ang_vel_z = 0.5
             # regularization rewards
             lin_vel_z = -1.0
             ang_vel_xy = -0.05
@@ -317,6 +318,9 @@ class LeggedRobotCfg(BaseConfig):
             dof_error = -0.04
             feet_stumble = -1
             feet_edge = -1
+            lazy_stop = -0.5
+            stand_still = -0.5
+            termination = -0.0
             
         only_positive_rewards = True # if true negative total rewards are clipped at zero (avoids early termination problems)
         tracking_sigma = 0.2 # tracking reward = exp(-error^2/sigma)

@@ -75,7 +75,7 @@ class Go2BaseCfg( LeggedRobotCfg ):
         soft_dof_pos_limit = 0.9
         base_height_target = 0.25
         class scales( LeggedRobotCfg.rewards.scales ):
-            tracking_goal_vel = 0
+            # tracking_goal_vel = 0
             tracking_lin_vel = 1.5
             stand_still = -0.2
             orientation = -1.5
@@ -100,19 +100,19 @@ class Go2BaseCfg( LeggedRobotCfg ):
         near_plane = 0.1
 
     class terrain( LeggedRobotCfg.terrain ):
-        curriculum = False # No curriculum
+        curriculum = True 
         # more rough
         downsampled_scale = 0.06
         height = [0.02, 0.12]
         terrain_dict = {"smooth slope": 0., 
-                        "rough slope up": 0.,
-                        "rough slope down": 0.,
+                        "rough slope up": 0.25,
+                        "rough slope down": 0.25,
                         "rough stairs up": 0., 
                         "rough stairs down": 0., 
-                        "discrete": 0., 
+                        "discrete": 0.25, 
                         "stepping stones": 0.,
                         "gaps": 0., 
-                        "smooth flat": 0.,
+                        "smooth flat": 0.25,
                         "pit": 0.,
                         "wall": 0.,
                         "platform": 0.,
@@ -120,21 +120,19 @@ class Go2BaseCfg( LeggedRobotCfg ):
                         "large stairs down": 0.,
                         "parkour": 0.,
                         "parkour_hurdle": 0.,
-                        "parkour_flat": 1.,
+                        "parkour_flat": 0.,
                         "parkour_step": 0.,
                         "parkour_gap": 0.,
                         "demo": 0.,}
         terrain_proportions = list(terrain_dict.values())
 
     class commands( LeggedRobotCfg.commands ):
-        heading_command = True
-        curriculum = False
+        curriculum = True
         class max_ranges( LeggedRobotCfg.commands.max_ranges ):
             # lin_vel_x = [0.3, 0.8]  # [m/s]
             lin_vel_x = [-1.0, 1.5]  # [m/s]
-            lin_vel_y = [0.0, 0.0]  # [m/s]
-            ang_yaw = [-np.pi, np.pi]  # [rad]
-            delta_yaw_threhold = 0.5 # [rad] clip  (ang_yaw/command_yaw - cur_yaw) to this range
+            lin_vel_y = [-0.5, 0.5]  # [m/s]
+            ang_yaw = [-1, 1]  # [rad]
 
     class domain_rand( LeggedRobotCfg.domain_rand ):
         randomize_friction = True

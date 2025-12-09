@@ -241,6 +241,7 @@ class OnPolicyRunner:
         num_pretrain_iter = 0
         for it in range(self.current_learning_iteration, tot_iter):
             start = time.time()
+            self.env.csk = int(it)  # pass current iteration to env for depth noise manager
             depth_latent_buffer = []
             recon_buffer = []
             scandots_buffer = []

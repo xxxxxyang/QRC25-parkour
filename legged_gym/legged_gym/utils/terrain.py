@@ -58,6 +58,7 @@ class Terrain:
         # self.env_slope_vec = np.zeros((cfg.num_rows, cfg.num_cols, 3))
         self.goals = np.zeros((cfg.num_rows, cfg.num_cols, cfg.num_goals, 3))
         self.num_goals = cfg.num_goals
+        self.has_goals = np.zeros((cfg.num_rows, cfg.num_cols), dtype=bool)
 
         self.width_per_env_pixels = int(self.env_width / cfg.horizontal_scale)
         self.length_per_env_pixels = int(self.env_length / cfg.horizontal_scale)
@@ -145,187 +146,331 @@ class Terrain:
             self.add_terrain_to_map(terrain, i, j)
     
     def add_roughness(self, terrain, difficulty=1):
-        max_height = (self.cfg.height[1] - self.cfg.height[0]) * difficulty + self.cfg.height[0]
+        diff = float(np.clip(difficulty, 0.0, 1.0))
+        max_height = (self.cfg.height[1] - self.cfg.height[0]) * diff + self.cfg.height[0]
         height = random.uniform(self.cfg.height[0], max_height)
         terrain_utils.random_uniform_terrain(terrain, min_height=-height, max_height=height, step=0.005, downsampled_scale=self.cfg.downsampled_scale)
 
     def make_terrain(self, choice, difficulty):
-        terrain = terrain_utils.SubTerrain(   "terrain",
-                                width=self.length_per_env_pixels,
-                                length=self.width_per_env_pixels,
-                                vertical_scale=self.cfg.vertical_scale,
-                                horizontal_scale=self.cfg.horizontal_scale)
+        # Create terrain base
+        terrain = terrain_utils.SubTerrain(
+            "terrain",
+            width=self.length_per_env_pixels,
+            length=self.width_per_env_pixels,
+            vertical_scale=self.cfg.vertical_scale,
+            horizontal_scale=self.cfg.horizontal_scale
+        )
+        terrain.goals = np.zeros((self.num_goals, 2))
+        terrain.has_goals = False
+        # Precompute parameters
         slope = difficulty * 0.4
         step_height = 0.02 + 0.14 * difficulty
-        discrete_obstacles_height = 0.03 + difficulty * 0.15
-        stepping_stones_size = 1.5 * (1.05 - difficulty)
-        stone_distance = 0.05 if difficulty==0 else 0.1
-        gap_size = 1. * difficulty
-        pit_depth = 1. * difficulty
-        if choice < self.proportions[0]:
-            idx = 0
-            if choice < self.proportions[0]/ 2:
-                idx = 1
-                slope *= -1
-            terrain_utils.pyramid_sloped_terrain(terrain, slope=slope, platform_size=3.)
-            # self.add_roughness(terrain)
-        elif choice < self.proportions[2]:
-            idx = 2
-            if choice<self.proportions[1]:
-                idx = 3
-                slope *= -1
-            terrain_utils.pyramid_sloped_terrain(terrain, slope=slope, platform_size=3.)
-            self.add_roughness(terrain)
-        elif choice < self.proportions[4]:
-            idx = 4
-            if choice<self.proportions[3]:
-                idx = 5
-                step_height *= -1
-            # terrain_utils.pyramid_stairs_terrain(terrain, step_width=0.31, step_height=step_height, platform_size=3.)
-            stairs_terrain_goal(terrain, step_width=0.31, step_height=step_height, platform_length=3., num_stones=self.num_goals-2)
-            self.add_roughness(terrain)
-        elif choice < self.proportions[5]:
-            idx = 6
-            num_rectangles = 20
-            rectangle_min_size = 0.5
-            rectangle_max_size = 2.
-            terrain_utils.discrete_obstacles_terrain(terrain, discrete_obstacles_height, rectangle_min_size, rectangle_max_size, num_rectangles, platform_size=3.)
-            self.add_roughness(terrain)
-        elif choice < self.proportions[6]:
-            idx = 7
-            stones_size = 1.5 - 1.2*difficulty
-            # terrain_utils.stepping_stones_terrain(terrain, stone_size=stones_size, stone_distance=0.1, stone_distance_rand=0, max_height=0.04*difficulty, platform_size=2.)
-            half_sloped_terrain(terrain, wall_width=4, start2center=0.5, max_height=0.00)
-            stepping_stones_terrain(terrain, stone_size=1.5-0.2*difficulty, stone_distance=0.0+0.4*difficulty, max_height=0.2*difficulty, platform_size=1.2)
-            self.add_roughness(terrain)
-        elif choice < self.proportions[7]:
-            idx = 8
-            # gap_size = random.uniform(self.cfg.gap_size[0], self.cfg.gap_size[1])
-            gap_parkour_terrain(terrain, difficulty, platform_size=4)
-            self.add_roughness(terrain)
-        elif choice < self.proportions[8]:
-            idx = 9
-            self.add_roughness(terrain)
-            # pass
-        elif choice < self.proportions[9]:
-            idx = 10
-            pit_terrain(terrain, depth=pit_depth, platform_size=4.)
-        elif choice < self.proportions[10]:
-            idx = 11
-            if self.cfg.all_vertical:
-                half_slope_difficulty = 1.0
-            else:
-                difficulty *= 1.3
-                if not self.cfg.no_flat:
-                    difficulty -= 0.1
-                if difficulty > 1:
-                    half_slope_difficulty = 1.0
-                elif difficulty < 0:
-                    self.add_roughness(terrain)
-                    terrain.slope_vector = np.array([1, 0., 0]).astype(np.float32)
-                    return terrain
-                else:
-                    half_slope_difficulty = difficulty
-            wall_width = 4 - half_slope_difficulty * 4
-            # terrain_utils.wall_terrain(terrain, height=1, start2center=0.7)
-            # terrain_utils.tanh_terrain(terrain, height=1.0, start2center=0.7)
-            if self.cfg.flat_wall:
-                half_sloped_terrain(terrain, wall_width=4, start2center=0.5, max_height=0.00)
-            else:
-                half_sloped_terrain(terrain, wall_width=wall_width, start2center=0.5, max_height=1.5)
-            max_height = terrain.height_field_raw.max()
-            top_mask = terrain.height_field_raw > max_height - 0.05
-            self.add_roughness(terrain, difficulty=1)
-            terrain.height_field_raw[top_mask] = max_height
-        elif choice < self.proportions[11]:
-            idx = 12
-            # half platform terrain
-            half_platform_terrain(terrain, max_height=0.1 + 0.4 * difficulty )
-            self.add_roughness(terrain, difficulty=1)
-        elif choice < self.proportions[13]:
-            idx = 13
-            height = 0.1 + 0.3 * difficulty
-            if choice < self.proportions[12]:
-                idx = 14
-                height *= -1
-            terrain_utils.pyramid_stairs_terrain(terrain, step_width=1., step_height=height, platform_size=3.)
-            self.add_roughness(terrain)
-        elif choice < self.proportions[14]:
-            x_range = [-0.1, 0.1+0.3*difficulty]  # offset to stone_len
-            y_range = [0.2, 0.3+0.1*difficulty]
-            stone_len = [0.9 - 0.3*difficulty, 1 - 0.2*difficulty]#2 * round((0.6) / 2.0, 1)
-            incline_height = 0.25*difficulty
-            last_incline_height = incline_height + 0.1 - 0.1*difficulty
-            parkour_terrain(terrain,
-                            num_stones=self.num_goals - 2,
-                            x_range=x_range, 
-                            y_range=y_range,
-                            incline_height=incline_height,
-                            stone_len=stone_len,
-                            stone_width=1.0, 
-                            last_incline_height=last_incline_height,
-                            pad_height=0,
-                            pit_depth=[0.2, 1])
-            idx = 15
-            # terrain.height_field_raw[:] = 0
-            self.add_roughness(terrain)
-        elif choice < self.proportions[15]:
-            idx = 16
-            parkour_hurdle_terrain(terrain,
-                                   num_stones=self.num_goals - 2,
-                                   stone_len=0.1+0.3*difficulty,
-                                   hurdle_height_range=[0.1+0.1*difficulty, 0.15+0.25*difficulty],
-                                   pad_height=0,
-                                   x_range=[1.2, 2.2],
-                                   y_range=self.cfg.y_range,
-                                   half_valid_width=[0.4, 0.8],
-                                   )
-            # terrain.height_field_raw[:] = 0
-            self.add_roughness(terrain)
-        elif choice < self.proportions[16]:
-            idx = 17
-            parkour_hurdle_terrain(terrain,
-                                   num_stones=self.num_goals - 2,
-                                   stone_len=0.1+0.3*difficulty,
-                                   hurdle_height_range=[0.1+0.1*difficulty, 0.15+0.15*difficulty],
-                                   pad_height=0,
-                                   y_range=self.cfg.y_range,
-                                   half_valid_width=[0.45, 1],
-                                   flat=True
-                                   )
-            self.add_roughness(terrain)
-        elif choice < self.proportions[17]:
-            idx = 18
-            parkour_step_terrain(terrain,
-                                   num_stones=self.num_goals - 2,
-                                   step_height=0.1 + 0.35*difficulty,
-                                   x_range=[0.3,1.5],
-                                   y_range=self.cfg.y_range,
-                                   half_valid_width=[0.5, 1],
-                                   pad_height=0,
-                                   )
-            self.add_roughness(terrain)
-        elif choice < self.proportions[18]:
-            idx = 19
-            parkour_gap_terrain(terrain,
-                                num_gaps=self.num_goals - 2,
-                                gap_size=0.1 + 0.7 * difficulty,
-                                gap_depth=[0.2, 1],
-                                pad_height=0,
-                                x_range=[0.8, 1.5],
-                                y_range=self.cfg.y_range,
-                                half_valid_width=[0.6, 1.2],
-                                # flat=True
-                                )
-            self.add_roughness(terrain)
-        elif choice < self.proportions[19]:
-            idx = 20
-            demo_terrain(terrain)
-            self.add_roughness(terrain)
-        # np.set_printoptions(precision=2)
-        # print(np.array(self.proportions), choice)
-        terrain.idx = idx
+        disc_obs_h = 0.03 + difficulty * 0.15
+        stones_size = 1.5 * (1.05 - difficulty)
+        gap_size = 1.0 * difficulty
+        pit_depth = 1.0 * difficulty
+        # lambda callable to capture local variables
+        ctx = locals()
+        # TERRAIN SPEC TABLE
+        specs = [
+            # ---------- idx 0 & 1 ----------
+            dict(
+                interval=(0, self.proportions[0]),
+                idx_fn=lambda: 1 if choice < self.proportions[0] / 2 else 0,
+                build=lambda: (
+                    terrain_utils.pyramid_sloped_terrain(
+                        terrain,
+                        slope=ctx["slope"] * (-1 if choice < self.proportions[0] / 2 else 1),
+                        platform_size=3.
+                    )
+                ),
+                rough=False,
+                has_goals=False
+            ),
+            # ---------- idx 2 & 3 ----------
+            dict(
+                interval=(self.proportions[0], self.proportions[2]),
+                idx_fn=lambda: 3 if choice < self.proportions[1] else 2,
+                build=lambda: (
+                    terrain_utils.pyramid_sloped_terrain(
+                        terrain,
+                        slope=ctx["slope"] * (-1 if choice < self.proportions[1] else 1),
+                        platform_size=3.
+                    )
+                ),
+                rough=True,
+                has_goals=False
+            ),
+            # ---------- idx 4 & 5 ----------
+            dict(
+                interval=(self.proportions[2], self.proportions[4]),
+                idx_fn=lambda: 5 if choice < self.proportions[3] else 4,
+                build=lambda: (
+                    parkour_stair_terrain(
+                        terrain,
+                        step_width=0.31,
+                        step_height=ctx["step_height"] * (-1 if choice < self.proportions[3] else 1),
+                        platform_length=3.,
+                        num_stones=self.num_goals - 2,
+                        y_range=[-0.3, 0.3],
+                        difficulty=difficulty
+                    )
+                ),
+                rough=True,
+                has_goals=True
+            ),
+            # ---------- idx 6 ----------
+            dict(
+                interval=(self.proportions[4], self.proportions[5]),
+                idx_fn=lambda: 6,
+                build=lambda: terrain_utils.discrete_obstacles_terrain(
+                    terrain,
+                    ctx["disc_obs_h"],
+                    0.5,
+                    2.0,
+                    20,
+                    platform_size=3.
+                ),
+                rough=True,
+                has_goals=False
+            ),
+            # ---------- idx 7 ----------
+            dict(
+                interval=(self.proportions[5], self.proportions[6]),
+                idx_fn=lambda: 7,
+                build=lambda: (
+                    half_sloped_terrain(terrain, wall_width=4, start2center=0.5, max_height=0.0),
+                    stepping_stones_terrain(
+                        terrain,
+                        stone_size=1.5 - 0.2 * difficulty,
+                        stone_distance=0.0 + 0.4 * difficulty,
+                        max_height=0.2 * difficulty,
+                        platform_size=1.2
+                    )
+                ),
+                rough=True,
+                has_goals=False
+            ),
+            # ---------- idx 8 ----------
+            dict(
+                interval=(self.proportions[6], self.proportions[7]),
+                idx_fn=lambda: 8,
+                build=lambda: gap_parkour_terrain(terrain, difficulty, platform_size=4),
+                rough=True,
+                has_goals=False
+            ),
+            # ---------- idx 9 ----------
+            dict(
+                interval=(self.proportions[7], self.proportions[8]),
+                idx_fn=lambda: 9,
+                build=lambda: None,
+                rough=True,
+                has_goals=False
+            ),
+            # ---------- idx 10 ----------
+            dict(
+                interval=(self.proportions[8], self.proportions[9]),
+                idx_fn=lambda: 10,
+                build=lambda: pit_terrain(terrain, depth=ctx["pit_depth"], platform_size=4.),
+                rough=False,
+                has_goals=False
+            ),
+            # ---------- idx 11 ----------
+            dict(
+                interval=(self.proportions[9], self.proportions[10]),
+                idx_fn=lambda: 11,
+                build=lambda: self._build_half_slope(terrain, difficulty),
+                rough=False,  # build 内部会 rough
+                has_goals=False
+            ),
+            # ---------- idx 12 ----------
+            dict(
+                interval=(self.proportions[10], self.proportions[11]),
+                idx_fn=lambda: 12,
+                build=lambda: half_platform_terrain(
+                    terrain,
+                    max_height=0.1 + 0.4 * difficulty
+                ),
+                rough=True,
+                has_goals=False
+            ),
+            # ---------- idx 13 & 14 ----------
+            dict(
+                interval=(self.proportions[11], self.proportions[13]),
+                idx_fn=lambda: 14 if choice < self.proportions[12] else 13,
+                build=lambda: terrain_utils.pyramid_stairs_terrain(
+                    terrain,
+                    step_width=1.,
+                    step_height=(0.1 + 0.3 * difficulty) * (-1 if choice < self.proportions[12] else 1),
+                    platform_size=3.
+                ),
+                rough=True,
+                has_goals=False
+            ),
+            # ---------- idx 15 ----------
+            dict(
+                interval=(self.proportions[13], self.proportions[14]),
+                idx_fn=lambda: 15,
+                build=lambda: parkour_terrain(
+                    terrain,
+                    num_stones=self.num_goals - 2,
+                    x_range=[-0.1, 0.1 + 0.3 * difficulty],
+                    y_range=[0.2, 0.3 + 0.1 * difficulty],
+                    incline_height=0.25 * difficulty,
+                    stone_len=[0.9 - 0.3 * difficulty, 1.0 - 0.2 * difficulty],
+                    stone_width=1.0,
+                    last_incline_height=0.25 * difficulty + 0.1 - 0.1 * difficulty,
+                    pad_height=0,
+                    pit_depth=[0.2, 1]
+                ),
+                rough=True,
+                has_goals=True
+            ),
+            # ---------- idx 16 ----------
+            dict(
+                interval=(self.proportions[14], self.proportions[15]),
+                idx_fn=lambda: 16,
+                build=lambda: parkour_hurdle_terrain(
+                    terrain,
+                    num_stones=self.num_goals - 2,
+                    stone_len=0.1 + 0.3 * difficulty,
+                    hurdle_height_range=[0.1 + 0.1 * difficulty, 0.15 + 0.25 * difficulty],
+                    pad_height=0,
+                    x_range=[1.2, 2.2],
+                    y_range=self.cfg.y_range,
+                    half_valid_width=[0.4, 0.8]
+                ),
+                rough=True,
+                has_goals=True
+            ),
+            # ---------- idx 17 ----------
+            dict(
+                interval=(self.proportions[15], self.proportions[16]),
+                idx_fn=lambda: 17,
+                build=lambda: parkour_hurdle_terrain(
+                    terrain,
+                    num_stones=self.num_goals - 2,
+                    stone_len=0.1 + 0.3 * difficulty,
+                    hurdle_height_range=[0.1 + 0.1 * difficulty, 0.15 + 0.15 * difficulty],
+                    pad_height=0,
+                    y_range=self.cfg.y_range,
+                    half_valid_width=[0.45, 1],
+                    flat=True
+                ),
+                rough=True,
+                has_goals=True
+            ),
+            # ---------- idx 18 ----------
+            dict(
+                interval=(self.proportions[16], self.proportions[17]),
+                idx_fn=lambda: 18,
+                build=lambda: (lambda hv: parkour_step_terrain(
+                    terrain,
+                    num_stones=self.num_goals - 2,
+                    step_height=0.1 + 0.35 * difficulty,
+                    x_range=[0.3, 1.5],
+                    y_range=self.cfg.y_range,
+                    half_valid_width=hv,
+                    pad_height=0
+                ))(
+                    (lambda: (
+                        lambda low, high: [low, high]
+                    )(
+                        # 计算 base
+                        low=np.clip((lambda base: base - 0.1)(
+                                0.3 + (1.0 - difficulty) * (1.8 - 0.3)
+                            ),0.3, 1.8
+                        ),
+                        high=np.clip((lambda base: base + 0.1)(
+                                0.3 + (1.0 - difficulty) * (1.8 - 0.3)
+                            ),0.3, 1.8
+                        )
+                    )
+                )()
+                ),
+                rough=True,
+                has_goals=True
+            ),
+            # ---------- idx 19 ----------
+            dict(
+                interval=(self.proportions[17], self.proportions[18]),
+                idx_fn=lambda: 19,
+                build=lambda: parkour_gap_terrain(
+                    terrain,
+                    num_gaps=self.num_goals - 2,
+                    gap_size=0.1 + 0.7 * difficulty,
+                    gap_depth=[0.2, 1],
+                    pad_height=0,
+                    x_range=[0.8, 1.5],
+                    y_range=self.cfg.y_range,
+                    half_valid_width=[0.6, 1.2],
+                ),
+                rough=True,
+                has_goals=True
+            ),
+            # ---------- idx 20 ----------
+            dict(
+                interval=(self.proportions[18], self.proportions[19]),
+                idx_fn=lambda: 20,
+                build=lambda: demo_terrain(terrain),
+                rough=True,
+                has_goals=True
+            )
+        ]
+        # SELECT TERRAIN USING choice
+        for spec in specs:
+            low, high = spec["interval"]
+            if low <= choice < high:
+                spec["build"]()
+                if spec["rough"]:
+                    self.add_roughness(terrain, difficulty)
+                terrain.idx = spec["idx_fn"]()
+                terrain.has_goals = spec["has_goals"]
+                if getattr(self.cfg, 'add_terrain_border', False):
+                    border_type = getattr(self.cfg, 'border_type', 'wall')
+                    self._add_terrain_border(terrain, border_type)
+                return terrain
+        # Fallback
+        terrain.idx = -1
+        terrain.has_goals = False
         return terrain
+    
+    def _add_terrain_border(self, terrain, border_type='wall'):
+        """
+        在子地形边缘添加物理隔离边界
+        
+        Args:
+            terrain: SubTerrain 对象
+            border_type: 'wall'（高墙）或 'pit'（深坑）
+        """
+        border_width = getattr(self.cfg, 'border_width', 0.15)  # 边界宽度 [米]
+        border_height = getattr(self.cfg, 'border_height', 1.0)  # 边界高度 [米]
+        passage_width = getattr(self.cfg, 'passage_width', 2.0)  # 中间通道宽度 [米]
+        
+        border_width_px = int(border_width / terrain.horizontal_scale)
+        passage_width_px = int(passage_width / terrain.horizontal_scale)
+        border_height_px = int(border_height / terrain.vertical_scale)
+        mid_y = terrain.length // 2
+        half_passage = passage_width_px // 2
+        
+        if border_type == 'wall':
+            # wall
+            border_value = int(border_height / terrain.vertical_scale)
+        else:
+            # pit
+            border_value = -int(border_height / terrain.vertical_scale)
+
+        # 获取当前地形的基准高度（避免墙比地形还低）
+        base_height = terrain.height_field_raw.max() if border_type == 'wall' else 0
+        final_value = base_height + border_value if border_type == 'wall' else border_value
+
+        # 左右边界 (y 方向)
+        terrain.height_field_raw[:, :border_width_px] = final_value
+        terrain.height_field_raw[:, -border_width_px:] = final_value
+
+        # 可选：前后边界 (x 方向) 
+        terrain.height_field_raw[:border_width_px, :mid_y - half_passage] = final_value
+        terrain.height_field_raw[:border_width_px, mid_y + half_passage:] = final_value
 
     def add_terrain_to_map(self, terrain, row, col):
         i = row
@@ -337,9 +482,18 @@ class Terrain:
         end_y = self.border + (j + 1) * self.width_per_env_pixels
         self.height_field_raw[start_x: end_x, start_y:end_y] = terrain.height_field_raw
 
-        # env_origin_x = (i + 0.5) * self.env_length
-        env_origin_x = i * self.env_length + 1.0
+        # 判断是否有目标点
+        has_goals = getattr(terrain, 'has_goals', False)
+        
+        if has_goals:
+            # 有目标的地形：保持原有逻辑，初始位置靠近地图起点
+            env_origin_x = i * self.env_length + 1.0
+        else:
+            # 无目标的地形：将初始位置设为地图中心点
+            env_origin_x = (i + 0.5) * self.env_length
+        
         env_origin_y = (j + 0.5) * self.env_width
+        
         x1 = int((self.env_length/2. - 0.5) / terrain.horizontal_scale) # within 1 meter square range
         x2 = int((self.env_length/2. + 0.5) / terrain.horizontal_scale)
         y1 = int((self.env_width/2. - 0.5) / terrain.horizontal_scale)
@@ -351,6 +505,7 @@ class Terrain:
         self.env_origins[i, j] = [env_origin_x, env_origin_y, env_origin_z]
         self.terrain_type[i, j] = terrain.idx
         self.goals[i, j, :, :2] = terrain.goals + [i * self.env_length, j * self.env_width]
+        self.has_goals[i, j] = has_goals
         # self.env_slope_vec[i, j] = terrain.slope_vector
 
 def gap_terrain(terrain, gap_size, platform_size=1.):
@@ -387,34 +542,6 @@ def gap_parkour_terrain(terrain, difficulty, platform_size=2.):
     scale = 15
     wall_center_x = [center_x - x1, center_x, center_x + x1]
     wall_center_y = [center_y - y1, center_y, center_y + y1]
-
-    # for i in range(center_y + y1, center_y + y2):
-    #     for j in range(center_x-x1, center_x + x1):
-    #         for w in wall_center_x:
-    #             height = scale * (-(slope_angle * np.abs(j - w)) + offset)
-    #             if terrain.height_field_raw[j, i] < height:
-    #                 terrain.height_field_raw[j, i] = int(height)
-    
-    # for i in range(center_y - y2, center_y - y1):
-    #     for j in range(center_x-x1, center_x + x1):
-    #         for w in wall_center_x:
-    #             height = scale * (-(slope_angle * np.abs(j - w)) + offset)
-    #             if terrain.height_field_raw[j, i] < height:
-    #                 terrain.height_field_raw[j, i] = int(height)
-
-    # for i in range(center_x + x1, center_x + x2):
-    #     for j in range(center_y-y1, center_y + y1):
-    #         for w in wall_center_y:
-    #             height = scale * (-(slope_angle * np.abs(j - w)) + offset)
-    #             if terrain.height_field_raw[i, j] < height:
-    #                 terrain.height_field_raw[i, j] = int(height)
-    
-    # for i in range(center_x - x2, center_x - x1):
-    #     for j in range(center_y-y1, center_y + y1):
-    #         for w in wall_center_y:
-    #             height = scale * (-(slope_angle * np.abs(j - w)) + offset)
-    #             if terrain.height_field_raw[i, j] < height:
-    #                 terrain.height_field_raw[i, j] = int(height)
 
 def parkour_terrain(terrain, 
                     platform_len=2.5, 
@@ -703,69 +830,72 @@ def parkour_step_terrain(terrain,
     terrain.height_field_raw[:pad_width, :] = pad_height
     terrain.height_field_raw[-pad_width:, :] = pad_height
 
-def stairs_terrain_goal(terrain, 
+def parkour_stair_terrain(terrain, 
                     step_width, 
                     step_height, 
                     platform_length=1.5,
                     num_stones=8,
                     x_range=[0.2, 0.4],
                     y_range=[-0.15, 0.15],
-                    half_valid_width=[0.45, 0.5]):
+                    half_valid_width=[0.45, 0.5],
+                    difficulty=0.5):
     # switch parameters to discrete units
     step_width = int(step_width / terrain.horizontal_scale)
-    
-    if step_height!=0:
-        step_height = int((step_height+0.03) / terrain.vertical_scale)
+
+    if step_height != 0:
+        step_height_px = int((abs(step_height) + 0.03) / terrain.vertical_scale)
+        step_sign = 1 if step_height > 0 else -1
         height = 0
-        start_x = int(platform_length/terrain.horizontal_scale)
-        stop_x = int(terrain.width - platform_length/terrain.horizontal_scale)
-            
-        while (stop_x - start_x) > 3.0/terrain.horizontal_scale:
+        start_x = int(platform_length / terrain.horizontal_scale)
+        stop_x = int(terrain.width - platform_length / terrain.horizontal_scale)
+
+        while (stop_x - start_x) > 3.0 / terrain.horizontal_scale:
             start_x += step_width
             stop_x -= step_width
-            height += step_height
+            height += step_height_px * step_sign
             terrain.height_field_raw[start_x: stop_x, :] = height
-            
         # 前后平台
-        terrain.height_field_raw[:round(platform_length/terrain.horizontal_scale), :] = 0
-        terrain.height_field_raw[-round(platform_length/terrain.horizontal_scale):, :] = 0
-        
-    mid_y = terrain.length * 1/2
-    # dis_x_min = round( (x_range[0] + step_height) / terrain.horizontal_scale)
-    # dis_x_max = round( (x_range[1] + step_height) / terrain.horizontal_scale)
-    # dis_y_min = round(y_range[0] / terrain.horizontal_scale)
-    # dis_y_max = round(y_range[1] / terrain.horizontal_scale)
-    dis_x = platform_length
-    last_dis_x = dis_x
-    x_start = platform_length+30
-    x_end = terrain.width - 1.0 // terrain.horizontal_scale
-    half_valid_width = round(np.random.uniform(half_valid_width[0], half_valid_width[1]) / terrain.horizontal_scale)
-    stair_height = 0
-    goals = np.zeros((num_stones+2, 2))
-    goals[0] = [x_start, mid_y]
-    for i in range(num_stones):
-        # # rand_x = np.random.randint(dis_x_min, dis_x_max)
-        # # rand_y = np.random.randint(dis_y_min, dis_y_max)
-        # rand_x = 0
-        # rand_y = 0
-        # if i < num_stones // 2:
-        #     stair_height += step_height
-        # elif i > num_stones // 2:
-        #     stair_height -= step_height
-        # terrain.height_field_raw[round(dis_x):round(dis_x+0.1), :] = stair_height
-        # # dis_x += rand_x
-        # terrain.height_field_raw[round(last_dis_x):round(dis_x), :round(mid_y)+round(rand_y-half_valid_width)] = 0
-        # terrain.height_field_raw[round(last_dis_x):round(dis_x), round(mid_y)+round(rand_y+half_valid_width):] = 0
+        terrain.height_field_raw[:round(platform_length / terrain.horizontal_scale), :] = 0
+        terrain.height_field_raw[-round(platform_length / terrain.horizontal_scale):, :] = 0
+    mid_y = terrain.length // 2
+    
+    # y 方向偏移量与 difficulty 正相关
+    y_offset_scale = 0.2 + 0.8 * difficulty  # difficulty=0 -> 0.2倍, difficulty=1 -> 1.0倍
+    dis_y_min = round(y_range[0] * y_offset_scale / terrain.horizontal_scale)
+    dis_y_max = round(y_range[1] * y_offset_scale / terrain.horizontal_scale)
+    
+    x_start = int(platform_length / terrain.horizontal_scale) + 30
+    x_end = int(terrain.width - 1.0 / terrain.horizontal_scale)
+    half_valid_width_px = round(np.random.uniform(half_valid_width[0], half_valid_width[1]) / terrain.horizontal_scale)
 
-        # last_dis_x = dis_x
-        goals[i+1] = [x_start + (i+1) * (x_end - x_start) / num_stones, mid_y]
-    # final_dis_x = dis_x + np.random.randint(dis_x_min, dis_x_max)
-    # # import ipdb; ipdb.set_trace()
-    # if final_dis_x > terrain.width:
-    #     final_dis_x = terrain.width - 0.5 // terrain.horizontal_scale
-    goals[-1] = [terrain.width - 1.0 // terrain.horizontal_scale , terrain.length * 1/2]
+    goals = np.zeros((num_stones + 2, 2))
+    goals[0] = [x_start, mid_y]
+
+    # 交替左右偏移标志
+    left_right_flag = np.random.randint(0, 2)
+
+    for i in range(num_stones):
+        goal_x = x_start + (i + 1) * (x_end - x_start) / (num_stones+1)
+
+        # 根据 difficulty 决定 y 偏移策略
+        if difficulty > 0.5 and dis_y_max > dis_y_min:
+            # 高难度：交替左右偏移，形成 S 形路径
+            pos_neg = 1 if left_right_flag else -1
+            base_offset = np.random.randint(max(1, abs(dis_y_min)), max(2, abs(dis_y_max)) + 1)
+            rand_y = pos_neg * base_offset
+            left_right_flag = 1 - left_right_flag  # 交替
+        else:
+            # 低难度：小范围随机偏移或无偏移
+            if dis_y_max > dis_y_min:
+                rand_y = np.random.randint(dis_y_min, dis_y_max + 1)
+            else:
+                rand_y = 0
+
+        goals[i + 1] = [goal_x, mid_y + rand_y]
+
+    goals[-1] = [x_end, mid_y]
     terrain.goals = goals * terrain.horizontal_scale
-        
+
     return terrain
 
 def demo_terrain(terrain):

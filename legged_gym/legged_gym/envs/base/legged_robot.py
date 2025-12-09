@@ -118,6 +118,7 @@ class LeggedRobot(BaseTask):
             print("Gamepad control enabled")
 
         self.noise_manager = DepthNoiseManager(self.cfg, self.device)
+        self.csk = None  # current step count for noise manager
         self.reset_idx(torch.arange(self.num_envs, device=self.device))
         self.post_physics_step()
 
@@ -190,7 +191,7 @@ class LeggedRobot(BaseTask):
         depth_image = self.resize_transform(depth_image[None, :]).squeeze()
         # 把当前 env 的 depth_buffer 传进去
         depth_buf = self.depth_buffer[env_id]
-        csk = self.global_counter
+        csk = self.global_counter if self.csk is None else (self.csk + 1)
         depth_image = self.noise_manager.add_noise(depth_image, depth_buf, csk)
         depth_image = self.normalize_depth_image(depth_image)
         return depth_image
@@ -210,6 +211,9 @@ class LeggedRobot(BaseTask):
         self.gym.start_access_image_tensors(self.sim)
 
         for i in range(self.num_envs):
+            init_flag = self.episode_length_buf <= 1
+            if init_flag[i]:
+                self.noise_manager.sample_mapping_condition()
             depth_image_ = self.gym.get_camera_image_gpu_tensor(self.sim, 
                                                                 self.envs[i], 
                                                                 self.cam_handles[i],
@@ -219,12 +223,12 @@ class LeggedRobot(BaseTask):
             depth_image_clean = self.process_depth_image(depth_image, i)
             depth_image = self.process_noise_depth_image(depth_image, i)
 
-            init_flag = self.episode_length_buf <= 1
             if init_flag[i]:
                 self.depth_buffer[i] = torch.stack([depth_image] * self.cfg.depth.buffer_len, dim=0)
-                self.noise_manager.sample_mapping_condition()
+                self.depth_buffer_clean[i] = torch.stack([depth_image_clean] * self.cfg.depth.buffer_len, dim=0)
             else:
                 self.depth_buffer[i] = torch.cat([self.depth_buffer[i, 1:], depth_image.to(self.device).unsqueeze(0)], dim=0)
+                self.depth_buffer_clean[i] = torch.cat([self.depth_buffer_clean[i, 1:], depth_image_clean.unsqueeze(0)], dim=0)
 
         self.gym.end_access_image_tensors(self.sim)
 
@@ -241,18 +245,7 @@ class LeggedRobot(BaseTask):
 
         norm = torch.norm(self.target_pos_rel, dim=-1, keepdim=True)
         target_vec_norm = self.target_pos_rel / (norm + 1e-5)
-        if self.cfg.commands.heading_command:
-             # 原始目标 yaw（命令中给定的绝对朝向）
-            target_yaw_raw = wrap_to_pi(self.commands[:, 2])
-            # 计算与当前 yaw 的差
-            delta_yaw = wrap_to_pi(target_yaw_raw - self.yaw)
-            # 限制 yaw 变化量在 ±delta_yaw_threshold
-            delta_yaw_threshold = self.command_ranges['delta_yaw_threshold']
-            delta_yaw_clamped = torch.clamp(delta_yaw, -delta_yaw_threshold, delta_yaw_threshold)
-            # 得到平滑的目标 yaw
-            self.target_yaw = wrap_to_pi(self.yaw + delta_yaw_clamped)
-        else:
-            self.target_yaw = torch.atan2(target_vec_norm[:, 1], target_vec_norm[:, 0])
+        self.target_yaw = torch.atan2(target_vec_norm[:, 1], target_vec_norm[:, 0])
         
 
         norm = torch.norm(self.next_target_pos_rel, dim=-1, keepdim=True)
@@ -303,6 +296,10 @@ class LeggedRobot(BaseTask):
 
         self.compute_observations() # in some cases a simulation step might be required to refresh some obs (for example body positions)
 
+        # self.episode_traveled_distance += torch.norm(self.root_states[:, 7:9], dim=-1) * self.dt
+        # # 累积理论最大可达距离（基于命令速度幅值）
+        # cmd_speed = torch.norm(self.commands[:, :2], dim=-1)
+        # self.episode_max_possible_distance += cmd_speed * self.dt
         self.last_actions[:] = self.actions[:]
         self.last_dof_vel[:] = self.dof_vel[:]
         self.last_torques[:] = self.torques[:]
@@ -313,12 +310,25 @@ class LeggedRobot(BaseTask):
             # self._draw_height_samples()
             self._draw_goals()
             self._draw_feet()
+            self._draw_env_bounds(self.lookat_id)
+            # self._draw_commands(self.lookat_id)
             if self.cfg.depth.use_camera:
                 window_name = "Depth Image"
                 cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
                 # cv2.imshow("Depth Image", (self.depth_buffer[self.lookat_id, -1].cpu().numpy() + 0.5)*0)
                 cv2.imshow("Depth Image", self.depth_buffer[self.lookat_id, -1].cpu().numpy() + 0.5)
                 # print("Depth Image: ", self.depth_buffer[self.lookat_id, -1].cpu().numpy()+0.5)
+                cv2.waitKey(1)
+
+                window_name = "Depth Clean"
+                cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+                img = None
+                if hasattr(self, "depth_buffer_clean") and self.depth_buffer_clean is not None:
+                    img = self.depth_buffer_clean[self.lookat_id, -1].detach().cpu().numpy()
+                else:
+                    # 回退到 buffer 的最后一帧（在极少数情况 update 尚未写入时）
+                    img = self.depth_buffer[self.lookat_id, -1].cpu().numpy()
+                cv2.imshow(window_name, img + 0.5)
                 cv2.waitKey(1)
 
     def reindex_feet(self, vec):
@@ -335,9 +345,11 @@ class LeggedRobot(BaseTask):
         pitch_cutoff = torch.abs(self.pitch) > 1.5
         reach_goal_cutoff = self.cur_goal_idx >= self.cfg.terrain.num_goals
         height_cutoff = self.root_states[:, 2] < -0.25
+        out_of_bounds = self._check_out_of_bounds() # 边界监测，视为超时不惩罚
 
         self.time_out_buf = self.episode_length_buf > self.max_episode_length # no terminal reward for time-outs
         self.time_out_buf |= reach_goal_cutoff
+        self.time_out_buf |= out_of_bounds
 
         self.reset_buf |= self.time_out_buf
         self.reset_buf |= roll_cutoff
@@ -360,8 +372,8 @@ class LeggedRobot(BaseTask):
         if self.cfg.terrain.curriculum:
             self._update_terrain_curriculum(env_ids)
         # avoid updating command curriculum at each step since the maximum command is common to all envs
-        if self.cfg.commands.curriculum and (self.common_step_counter % self.max_episode_length==0):
-            self.update_command_curriculum(env_ids)
+        if self.cfg.commands.curriculum:
+            self._update_command_curriculum(env_ids)
 
         # reset robot states
         self._reset_dofs(env_ids)
@@ -395,7 +407,9 @@ class LeggedRobot(BaseTask):
         if self.cfg.terrain.curriculum:
             self.extras["episode"]["terrain_level"] = torch.mean(self.terrain_levels.float())
         if self.cfg.commands.curriculum:
-            self.extras["episode"]["max_command_x"] = self.command_ranges["lin_vel_x"][1]
+            self.extras["episode"]["max_command_x"] = torch.mean(self.command_ranges["lin_vel_x"][:, 1]).item()
+            self.extras["episode"]["max_command_y"] = torch.mean(self.command_ranges["lin_vel_y"][:, 1]).item()
+            self.extras["episode"]["max_command_ang_vel"] = torch.mean(self.command_ranges["ang_vel_z"][:, 1]).item()
         # send timeout info to the algorithm
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf
@@ -429,34 +443,25 @@ class LeggedRobot(BaseTask):
         if self.cfg.env.joystick_ctrl:
             # TODO： need to be modified for target yaw
             # use joystick(gamepad) control
-            lin_speed, delta_yaw, gait_type, e_stop, _ = self.command_function()
+            lin_speed, ang_vel_z, gait_type, e_stop, _ = self.command_function()
             if e_stop:
                 import sys
                 sys.exit(0)
             self.commands[:, 0] = lin_speed[0]
             self.commands[:, 1] = lin_speed[1]
-            # yaw command
-            # self.target_yaw = wrap_to_pi(torch.tensor(yaw, device = self.device).unsqueeze(0))
-            self.delta_yaw = wrap_to_pi(delta_yaw)
-            self.delta_next_yaw = self.delta_yaw
-        elif self.cfg.env.keyboard_ctrl:
-            # use keyboard control ang_speed
-            self.target_yaw = wrap_to_pi(self.commands[:, 2])
-            self.delta_yaw = wrap_to_pi(self.target_yaw - self.yaw)
-            self.delta_next_yaw = self.delta_yaw
+            self.commands[:, 2] = ang_vel_z
         else:
             self.delta_yaw = wrap_to_pi(self.target_yaw - self.yaw)
             self.delta_next_yaw = wrap_to_pi(self.next_target_yaw - self.yaw)
 
         obs_buf = torch.cat((#skill_vector, 
-                            self.base_ang_vel  * self.obs_scales.ang_vel,   #[1,3]
-                            imu_obs,    #[1,2]
-                            0*self.delta_yaw[:, None], 
-                            self.delta_yaw[:, None],
-                            0*self.delta_next_yaw[:, None],
-                            0*self.commands[:, 0:2], 
-                            self.commands[:, 0:1],  #[1,1]
-                            (self.env_class != 17).float()[:, None], 
+                            self.base_ang_vel  * self.obs_scales.ang_vel,   # [1,3]
+                            imu_obs,    # [1,2] roll, pitch
+                            self.commands[:, 0:1],  # [1,1] vx
+                            self.commands[:, 1:2],  # [1,1] vy
+                            self.commands[:, 2:3],  # [1,1] wz
+                            0*self.commands[:, 0:3],  # [1,3] 占位
+                            (self.env_class != 17).float()[:, None],
                             (self.env_class == 17).float()[:, None],
                             self.reindex((self.dof_pos - self.default_dof_pos_all) * self.obs_scales.dof_pos),
                             self.reindex(self.dof_vel * self.obs_scales.dof_vel),
@@ -477,7 +482,7 @@ class LeggedRobot(BaseTask):
             self.obs_buf = torch.cat([obs_buf, heights, priv_explicit, priv_latent, self.obs_history_buf.view(self.num_envs, -1)], dim=-1)
         else:
             self.obs_buf = torch.cat([obs_buf, priv_explicit, priv_latent, self.obs_history_buf.view(self.num_envs, -1)], dim=-1)
-        obs_buf[:, 6:8] = 0  # mask yaw in proprioceptive history
+        # obs_buf[:, 6:8] = 0  # mask yaw in proprioceptive history
         self.obs_history_buf = torch.where(
             (self.episode_length_buf <= 1)[:, None, None], 
             torch.stack([obs_buf] * self.cfg.env.history_len, dim=1),
@@ -614,39 +619,119 @@ class LeggedRobot(BaseTask):
         """ Callback called before computing terminations, rewards, and observations
             Default behaviour: Compute ang vel command based on target and heading, compute measured terrain heights and randomly push robots
         """
-        if self.cfg.commands.heading_command:
-            # 当使用heading_command时，使用更低的频率更新yaw命令
-            env_ids_lin = (self.episode_length_buf % int(self.cfg.commands.resampling_time / self.dt) == 0)
-            lin_envs = env_ids_lin.nonzero(as_tuple=False).flatten()
-            if len(lin_envs) > 0:
-                self._resample_lin_commands(lin_envs)
-            env_ids_yaw = (self.episode_length_buf % int(self.cfg.commands.heading_resampling_time / self.dt) == 0)
-            yaw_envs = env_ids_yaw.nonzero(as_tuple=False).flatten()
-            if len(yaw_envs) > 0:
-                self._resample_yaw_commands(yaw_envs)
-        else:
-            # 否则按照resampling_time的频率一起更新线速度和yaw命令
-            env_ids = (self.episode_length_buf % int(self.cfg.commands.resampling_time / self.dt)==0)
-            self._resample_commands(env_ids.nonzero(as_tuple=False).flatten())
+        self._update_commands_based_on_goals()
         
         if self.cfg.terrain.measure_heights:
             if self.global_counter % self.cfg.depth.update_interval == 0:
                 self.measured_heights = self._get_heights()
         if self.cfg.domain_rand.push_robots and  (self.common_step_counter % self.cfg.domain_rand.push_interval == 0):
             self._push_robots()
+
+    def _update_commands_based_on_goals(self):
+        """
+        根据当前地形是否有 goals 来更新命令：
+        - 有 goals：基于目标位置生成命令
+        - 无 goals：使用随机采样的命令
+        """
+        # 获取有 goals 和无 goals 的环境 mask
+        has_goals_mask = self.env_has_goals
+        no_goals_mask = ~has_goals_mask
+        
+        # 对于有 goals 的环境，基于目标生成命令
+        if has_goals_mask.any():
+            self._update_goal_based_commands(has_goals_mask)
+        
+        # 对于无 goals 的环境，按时间间隔重采样随机命令
+        if no_goals_mask.any():
+            resample_mask = (self.episode_length_buf % int(self.cfg.commands.resampling_time / self.dt) == 0) & no_goals_mask
+            resample_ids = resample_mask.nonzero(as_tuple=False).flatten()
+            if len(resample_ids) > 0:
+                self._resample_commands(resample_ids)
+
+    def _update_goal_based_commands(self, env_mask):
+        """
+        基于当前目标位置生成命令（仅对 env_mask 为 True 的环境）
+        commands: [vx, vy, wz]
+        """
+        # 将目标相对位置转换到机器人局部坐标系
+        target_local = quat_rotate_inverse(self.base_quat, 
+                                           torch.cat([self.target_pos_rel, 
+                                                     torch.zeros(self.num_envs, 1, device=self.device)], dim=1))
+        
+        # 计算目标方向的 yaw 角（用于生成角速度命令）
+        target_yaw_local = torch.atan2(target_local[:, 1], target_local[:, 0])
+        
+        # 获取配置参数
+        x_ratio = getattr(self.cfg.commands, 'goal_x_ratio', 1.0)
+        y_ratio = getattr(self.cfg.commands, 'goal_y_ratio', 0.5)
+        yaw_ratio = getattr(self.cfg.commands, 'goal_yaw_ratio', 1.0)
+        
+        # 计算 vx 命令
+        x_cmd = torch.clip(
+            target_local[:, 0] * x_ratio,
+            min=self.command_ranges["lin_vel_x"][0],
+            max=self.command_ranges["lin_vel_x"][1],
+        )
+        
+        # 计算 vy 命令
+        y_cmd = torch.clip(
+            target_local[:, 1] * y_ratio,
+            min=self.command_ranges["lin_vel_y"][0],
+            max=self.command_ranges["lin_vel_y"][1],
+        )
+        
+        # 计算 wz 命令（角速度）
+        wz_cmd = torch.clip(
+            target_yaw_local * yaw_ratio,
+            min=self.command_ranges["ang_vel_z"][0],
+            max=self.command_ranges["ang_vel_z"][1],
+        )
+        
+        # 应用命令截断
+        lin_vel_clip = getattr(self.cfg.commands, 'lin_vel_clip', 0.2)
+        ang_vel_clip = getattr(self.cfg.commands, 'ang_vel_clip', 0.1)
+        
+        x_cmd[torch.abs(x_cmd) < lin_vel_clip] = 0.
+        y_cmd[torch.abs(y_cmd) < lin_vel_clip] = 0.
+        wz_cmd[torch.abs(wz_cmd) < ang_vel_clip] = 0.
+        
+        # 可选：当偏差过大时停止前进
+        x_stop_by_yaw_threshold = getattr(self.cfg.commands, 'x_stop_by_yaw_threshold', None)
+        if x_stop_by_yaw_threshold is not None:
+            large_yaw_mask = torch.abs(target_yaw_local) > x_stop_by_yaw_threshold
+            x_cmd[large_yaw_mask & env_mask] = 0.
+        
+        # 仅更新有 goals 的环境
+        self.commands[env_mask, 0] = x_cmd[env_mask]
+        self.commands[env_mask, 1] = y_cmd[env_mask]
+        self.commands[env_mask, 2] = wz_cmd[env_mask]  # 角速度
         
     def _gather_cur_goals(self, future=0):
         return self.env_goals.gather(1, (self.cur_goal_idx[:, None, None]+future).expand(-1, -1, self.env_goals.shape[-1])).squeeze(1)
 
     def _resample_commands(self, env_ids):
-        """ Randommly select commands of some environments
+        """ Randomly select commands of some environments
         Args:
             env_ids (List[int]): Environments ids for which new commands are needed
         """
-        self.commands[env_ids, 0] = torch_rand_float(self.command_ranges["lin_vel_x"][0], self.command_ranges["lin_vel_x"][1], (len(env_ids), 1), device=self.device).squeeze(1)
-        self.commands[env_ids, 2] = torch_rand_float(self.command_ranges["ang_yaw"][0], self.command_ranges["ang_yaw"][1], (len(env_ids), 1), device=self.device).squeeze(1)
-        self.commands[env_ids, 2] *= torch.abs(self.commands[env_ids, 2]) > self.cfg.commands.ang_yaw_clip
+        # 逐 env 采样，因为每个 env 有不同的 command_range
+        for idx in env_ids:
+            i = int(idx)
+            self.commands[i, 0] = torch.empty(1, device=self.device).uniform_(
+                float(self.command_ranges["lin_vel_x"][i, 0]),
+                float(self.command_ranges["lin_vel_x"][i, 1])
+            ).squeeze()
+            self.commands[i, 1] = torch.empty(1, device=self.device).uniform_(
+                float(self.command_ranges["lin_vel_y"][i, 0]),
+                float(self.command_ranges["lin_vel_y"][i, 1])
+            ).squeeze()
+            self.commands[i, 2] = torch.empty(1, device=self.device).uniform_(
+                float(self.command_ranges["ang_vel_z"][i, 0]),
+                float(self.command_ranges["ang_vel_z"][i, 1])
+            ).squeeze()
+        
         # set small commands to zero
+        self.commands[env_ids, 2] *= torch.abs(self.commands[env_ids, 2]) > self.cfg.commands.ang_vel_clip
         self.commands[env_ids, :2] *= torch.abs(self.commands[env_ids, 0:1]) > self.cfg.commands.lin_vel_clip
 
     def _resample_lin_commands(self, env_ids):
@@ -661,18 +746,6 @@ class LeggedRobot(BaseTask):
         ).squeeze(1)
         # set small commands to zero
         self.commands[env_ids, :2] *= torch.abs(self.commands[env_ids, 0:1]) > self.cfg.commands.lin_vel_clip
-
-    def _resample_yaw_commands(self, env_ids):
-        """Resample yaw (angular velocity) commands"""
-        # 使用相对yaw角速度命令
-        self.commands[env_ids, 2] = torch_rand_float(
-            self.command_ranges["ang_yaw"][0],
-            self.command_ranges["ang_yaw"][1],
-            (len(env_ids), 1),
-            device=self.device
-        ).squeeze(1)
-        # set small commands to zero
-        self.commands[env_ids, 2] *= torch.abs(self.commands[env_ids, 2]) > self.cfg.commands.ang_yaw_clip
 
     def _compute_torques(self, actions):
         """ Compute torques from actions.
@@ -757,34 +830,105 @@ class LeggedRobot(BaseTask):
         self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(self.root_states))
 
     def _update_terrain_curriculum(self, env_ids):
-        """ Implements the game-inspired curriculum.
-
-        Args:
-            env_ids (List[int]): ids of environments being reset
         """
-        # Implement Terrain curriculum
+        分场景的 terrain curriculum：
+        - 有 goals：基于目标完成率
+        - 无 goals：基于速度跟踪效率
+        """
         if not self.init_done:
-            # don't change on initial reset
             return
-        
-        dis_to_origin = torch.norm(self.root_states[env_ids, :2] - self.env_origins[env_ids, :2], dim=1)
-        threshold = self.commands[env_ids, 0] * self.cfg.env.episode_length_s
-        move_up = dis_to_origin > 0.8*threshold
-        move_down = dis_to_origin < 0.4*threshold
+
+        move_up = torch.zeros(len(env_ids), dtype=torch.bool, device=self.device)
+        move_down = torch.zeros(len(env_ids), dtype=torch.bool, device=self.device)
+        if hasattr(self, 'env_has_goals'):
+            has_goals = self.env_has_goals[env_ids]
+            no_goals = ~has_goals
+
+            # === 有 goals 的环境：基于目标完成率 ===
+            if has_goals.any():
+                goals_completed = self.cur_goal_idx[env_ids].float() / max(self.cfg.terrain.num_goals, 1)
+                move_up[has_goals] = goals_completed[has_goals] > 0.6
+                move_down[has_goals] = goals_completed[has_goals] < 0.2
+            # === 无 goals 的环境：基于速度跟踪效率 ===
+            if no_goals.any():
+                traveled = self.episode_traveled_distance[env_ids]
+                max_possible = torch.clamp(self.episode_max_possible_distance[env_ids], min=0.5)
+                efficiency = traveled / max_possible
+                # 同时考虑存活时间
+                survival_ratio = self.episode_length_buf[env_ids].float() / self.max_episode_length
+                combined_score = 0.5 * efficiency + 0.5 * survival_ratio
+                move_up[no_goals] = combined_score[no_goals] > 0.6
+                move_down[no_goals] = combined_score[no_goals] < 0.3
+        else:
+            # 兜底：只用速度效率
+            traveled = self.episode_traveled_distance[env_ids]
+            max_possible = torch.clamp(self.episode_max_possible_distance[env_ids], min=0.5)
+            efficiency = traveled / max_possible
+            move_up = efficiency > 0.7
+            move_down = efficiency < 0.3
 
         self.terrain_levels[env_ids] += 1 * move_up - 1 * move_down
-        # # Robots that solve the last level are sent to a random one
-        self.terrain_levels[env_ids] = torch.where(self.terrain_levels[env_ids]>=self.max_terrain_level,
-                                                   torch.randint_like(self.terrain_levels[env_ids], self.max_terrain_level),
-                                                   torch.clip(self.terrain_levels[env_ids], 0)) # (the minumum level is zero)
+        self.terrain_levels[env_ids] = torch.where(
+            self.terrain_levels[env_ids] >= self.max_terrain_level,
+            torch.randint_like(self.terrain_levels[env_ids], self.max_terrain_level),
+            torch.clip(self.terrain_levels[env_ids], 0)
+        )
+
+        # 更新相关状态
         self.env_origins[env_ids] = self.terrain_origins[self.terrain_levels[env_ids], self.terrain_types[env_ids]]
         self.env_class[env_ids] = self.terrain_class[self.terrain_levels[env_ids], self.terrain_types[env_ids]]
-        
+        if hasattr(self, 'terrain') and hasattr(self.terrain, 'has_goals'):
+            has_goals_np = self.terrain.has_goals
+            levels = self.terrain_levels[env_ids].cpu().numpy().astype(int)
+            types = self.terrain_types[env_ids].cpu().numpy().astype(int)
+            has_goals_flat = has_goals_np[levels, types]
+            self.env_has_goals[env_ids] = torch.from_numpy(has_goals_flat).to(self.device).to(torch.bool)
         temp = self.terrain_goals[self.terrain_levels, self.terrain_types]
         last_col = temp[:, -1].unsqueeze(1)
         self.env_goals[:] = torch.cat((temp, last_col.repeat(1, self.cfg.env.num_future_goal_obs, 1)), dim=1)[:]
         self.cur_goals = self._gather_cur_goals()
         self.next_goals = self._gather_cur_goals(future=1)
+        self._update_env_bounds(env_ids)
+
+    def _update_command_curriculum(self, env_ids):
+        """
+        基于 terrain_levels 更新命令范围（curriculum）
+        """
+        if not self.init_done:
+            return
+        
+        terrain_levels = self.terrain_levels[env_ids]
+        max_level = self.max_terrain_level - 1
+        
+        level_ratio = torch.clamp(terrain_levels.float() / max(max_level, 1), 0.0, 1.0)
+        
+        min_ratio = 0.3
+        command_scale = min_ratio + (1.0 - min_ratio) * level_ratio
+        
+        # 获取 max_ranges
+        max_lin_vel_x = self.command_max_ranges["lin_vel_x"]
+        max_lin_vel_y = self.command_max_ranges["lin_vel_y"]
+        max_ang_vel_z = self.command_max_ranges["ang_vel_z"]
+        
+        # 逐 env 更新（张量索引赋值）
+        self.command_ranges["lin_vel_x"][env_ids, 0] = max_lin_vel_x[0] * command_scale
+        self.command_ranges["lin_vel_x"][env_ids, 1] = max_lin_vel_x[1] * command_scale
+        
+        self.command_ranges["lin_vel_y"][env_ids, 0] = max_lin_vel_y[0] * command_scale
+        self.command_ranges["lin_vel_y"][env_ids, 1] = max_lin_vel_y[1] * command_scale
+        
+        self.command_ranges["ang_vel_z"][env_ids, 0] = max_ang_vel_z[0] * command_scale
+        self.command_ranges["ang_vel_z"][env_ids, 1] = max_ang_vel_z[1] * command_scale
+        
+        # # 可选：记录当前全局难度级别（用于 log / monitor）
+        # mean_level = torch.mean(self.terrain_levels.float())
+        # mean_scale = min_ratio + (1.0 - min_ratio) * (mean_level / max(max_level, 1))
+        # if hasattr(self, 'extras') and isinstance(self.extras, dict):
+        #     if "episode" not in self.extras:
+        #         self.extras["episode"] = {}
+        #     self.extras["episode"]["command_curriculum_scale"] = float(mean_scale)
+        #     self.extras["episode"]["mean_terrain_level"] = float(mean_level)
+
 
     #----------------------------------------
     def _init_buffers(self):
@@ -837,8 +981,6 @@ class LeggedRobot(BaseTask):
         self.contact_buf = torch.zeros(self.num_envs, self.cfg.env.contact_buf_len, 4, device=self.device, dtype=torch.float)
 
         self.commands = torch.zeros(self.num_envs, self.cfg.commands.num_commands, dtype=torch.float, device=self.device, requires_grad=False) # x vel, y vel, yaw vel, heading
-        self._resample_commands(torch.arange(self.num_envs, device=self.device, requires_grad=False))
-        self.commands_scale = torch.tensor([self.obs_scales.lin_vel, self.obs_scales.lin_vel, self.obs_scales.ang_vel], device=self.device, requires_grad=False,) # TODO change this
         self.feet_air_time = torch.zeros(self.num_envs, self.feet_indices.shape[0], dtype=torch.float, device=self.device, requires_grad=False)
         self.last_contacts = torch.zeros(self.num_envs, len(self.feet_indices), dtype=torch.bool, device=self.device, requires_grad=False)
         self.last_contact_forces = torch.zeros_like(self.contact_forces)
@@ -880,6 +1022,103 @@ class LeggedRobot(BaseTask):
                                             self.cfg.depth.buffer_len, 
                                             self.cfg.depth.resized[1], 
                                             self.cfg.depth.resized[0]).to(self.device)
+            self.depth_buffer_clean = torch.zeros(self.num_envs,
+                                                  self.cfg.depth.buffer_len,
+                                                  self.cfg.depth.resized[1],
+                                                  self.cfg.depth.resized[0]).to(self.device)
+
+        # bounds check
+        self.env_bounds = torch.zeros(self.num_envs, 4, device=self.device)  # [x_min, x_max, y_min, y_max]
+        self._compute_env_bounds()
+
+        # goals command
+        self.env_has_goals = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        if hasattr(self, 'terrain') and hasattr(self.terrain, 'has_goals'):
+            has_goals_np = self.terrain.has_goals  # shape: (num_rows, num_cols)
+            # 根据 terrain_levels 和 terrain_types 获取每个 env 是否有 goals
+            if hasattr(self, 'terrain_levels') and hasattr(self, 'terrain_types'):
+                levels = self.terrain_levels.cpu().numpy().astype(int)
+                types = self.terrain_types.cpu().numpy().astype(int)
+                has_goals_flat = has_goals_np[levels, types]  # numpy array (num_envs,)
+                self.env_has_goals[:] = torch.from_numpy(has_goals_flat).to(self.device).to(torch.bool)
+        
+        # 用于存储随机采样的 x 命令（当 x_stop_by_yaw 时使用）
+        self.sampled_x_cmd_buffer = torch.zeros(self.num_envs, device=self.device)
+        # update terrain levels
+        self.episode_traveled_distance = torch.zeros(self.num_envs, device=self.device, requires_grad=False)
+        self.episode_max_possible_distance = torch.zeros(self.num_envs, device=self.device, requires_grad=False)
+
+        self.command_ranges = {
+            "lin_vel_x": torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device),
+            "lin_vel_y": torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device),
+            "ang_vel_z": torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device),
+        }
+        # 初始化为 max_ranges
+        self.command_ranges["lin_vel_x"][:] = torch.tensor(self.command_max_ranges["lin_vel_x"], device=self.device)
+        self.command_ranges["lin_vel_y"][:] = torch.tensor(self.command_max_ranges["lin_vel_y"], device=self.device)
+        self.command_ranges["ang_vel_z"][:] = torch.tensor(self.command_max_ranges["ang_vel_z"], device=self.device)
+        self._resample_commands(torch.arange(self.num_envs, device=self.device, requires_grad=False))
+
+    def _compute_env_bounds(self):
+        """
+        计算每个环境的逻辑边界（世界坐标）
+        边界 = subterrain 的物理范围，与 agent 初始位置无关
+        """
+        border_margin = getattr(self.cfg.env, 'border_margin', 0.1)
+        
+        env_length = self.cfg.terrain.terrain_length
+        env_width = self.cfg.terrain.terrain_width
+        
+        # 直接基于 terrain_levels (row i) 和 terrain_types (col j) 计算
+        # subterrain 范围：
+        #   x: [i * env_length, (i+1) * env_length]
+        #   y: [j * env_width, (j+1) * env_width]
+        
+        # terrain_levels 对应 row index (i)
+        # terrain_types 对应 col index (j)
+        row_indices = self.terrain_levels.float()  # i
+        col_indices = self.terrain_types.float()   # j
+        
+        # x 方向边界
+        self.env_bounds[:, 0] = row_indices * env_length + border_margin  # x_min
+        self.env_bounds[:, 1] = (row_indices + 1) * env_length - border_margin  # x_max
+        
+        # y 方向边界
+        self.env_bounds[:, 2] = col_indices * env_width + border_margin  # y_min
+        self.env_bounds[:, 3] = (col_indices + 1) * env_width - border_margin  # y_max
+
+    def _update_env_bounds(self, env_ids):
+        """
+        当环境的 terrain level/type 改变时，更新对应的边界
+        """
+        border_margin = getattr(self.cfg.env, 'border_margin', 0.1)
+        env_length = self.cfg.terrain.terrain_length
+        env_width = self.cfg.terrain.terrain_width
+
+        row_indices = self.terrain_levels[env_ids].float()
+        col_indices = self.terrain_types[env_ids].float()
+        
+        self.env_bounds[env_ids, 0] = row_indices * env_length + border_margin
+        self.env_bounds[env_ids, 1] = (row_indices + 1) * env_length - border_margin
+        self.env_bounds[env_ids, 2] = col_indices * env_width + border_margin
+        self.env_bounds[env_ids, 3] = (col_indices + 1) * env_width - border_margin
+
+    def _check_out_of_bounds(self):
+        """
+        检测 agent 是否超出 subterrain 边界
+        Returns:
+            out_of_bounds: (num_envs,) bool tensor，True 表示越界
+        """
+        pos_x = self.root_states[:, 0]
+        pos_y = self.root_states[:, 1]
+        
+        out_of_bounds = (
+            (pos_x < self.env_bounds[:, 0]) |
+            (pos_x > self.env_bounds[:, 1]) |
+            (pos_y < self.env_bounds[:, 2]) |
+            (pos_y > self.env_bounds[:, 3])
+        )
+        return out_of_bounds
 
     def _prepare_reward_function(self):
         """ Prepares a list of reward functions, whcih will be called to compute the total reward.
@@ -1143,8 +1382,9 @@ class LeggedRobot(BaseTask):
             self.env_origins = torch.zeros(self.num_envs, 3, device=self.device, requires_grad=False)
             self.env_class = torch.zeros(self.num_envs, device=self.device, requires_grad=False)
             # put robots at the origins defined by the terrain
-            max_init_level = self.cfg.terrain.max_init_terrain_level
-            if not self.cfg.terrain.curriculum: max_init_level = self.cfg.terrain.num_rows - 1
+            max_init_level = self.cfg.terrain.max_init_terrain_level if self.cfg.terrain.max_init_terrain_level <= (self.cfg.terrain.num_rows - 1) else (self.cfg.terrain.num_rows - 1)
+            if not self.cfg.terrain.curriculum: 
+                max_init_level = self.cfg.terrain.num_rows - 1
             self.terrain_levels = torch.randint(0, max_init_level+1, (self.num_envs,), device=self.device)
             self.terrain_types = torch.div(torch.arange(self.num_envs, device=self.device), (self.num_envs/self.cfg.terrain.num_cols), rounding_mode='floor').to(torch.long)
             self.max_terrain_level = self.cfg.terrain.num_rows
@@ -1182,10 +1422,8 @@ class LeggedRobot(BaseTask):
         reward_norm_factor = 1#np.sum(list(self.reward_scales.values()))
         for rew in self.reward_scales:
             self.reward_scales[rew] = self.reward_scales[rew] / reward_norm_factor
-        if self.cfg.commands.curriculum:
-            self.command_ranges = class_to_dict(self.cfg.commands.ranges)
-        else:
-            self.command_ranges = class_to_dict(self.cfg.commands.max_ranges)
+        self.command_max_ranges = class_to_dict(self.cfg.commands.max_ranges)
+        self.command_ranges = None
         if self.cfg.terrain.mesh_type not in ['heightfield', 'trimesh']:
             self.cfg.terrain.curriculum = False
         self.max_episode_length_s = self.cfg.env.episode_length_s
@@ -1257,21 +1495,31 @@ class LeggedRobot(BaseTask):
             gymutil.draw_lines(sphere_geom, self.gym, self.viewer, self.envs[i], sphere_pose)
 
     def _draw_goals(self):
-        sphere_geom = gymutil.WireframeSphereGeometry(0.1, 32, 32, None, color=(1, 0, 0))
-        sphere_geom_cur = gymutil.WireframeSphereGeometry(0.1, 32, 32, None, color=(0, 0, 1))
+        if hasattr(self, "env_has_goals") and not self.env_has_goals[self.lookat_id]:
+            return
+        sphere_geom_passed = gymutil.WireframeSphereGeometry(0.1, 32, 32, None, color=(0, 1, 0))  # 已经过的 goal: 绿色
+        sphere_geom_cur = gymutil.WireframeSphereGeometry(0.1, 32, 32, None, color=(0, 0, 1))     # 当前目标: 蓝色
+        sphere_geom_next = gymutil.WireframeSphereGeometry(0.1, 32, 32, None, color=(1, 0, 0))    # 下一个目标: 红色
+        sphere_geom_default = gymutil.WireframeSphereGeometry(0.1, 32, 32, None, color=(0.6, 0.6, 0.6))  # 其他: 灰色
         sphere_geom_reached = gymutil.WireframeSphereGeometry(self.cfg.env.next_goal_threshold, 32, 32, None, color=(0, 1, 0))
         goals = self.terrain_goals[self.terrain_levels[self.lookat_id], self.terrain_types[self.lookat_id]].cpu().numpy()
+        cur_idx = int(self.cur_goal_idx[self.lookat_id].cpu().item())
+        n_goals = goals.shape[0]
         for i, goal in enumerate(goals):
             goal_xy = goal[:2] + self.terrain.cfg.border_size
             pts = (goal_xy/self.terrain.cfg.horizontal_scale).astype(int)
             goal_z = self.height_samples[pts[0], pts[1]].cpu().item() * self.terrain.cfg.vertical_scale
             pose = gymapi.Transform(gymapi.Vec3(goal[0], goal[1], goal_z), r=None)
-            if i == self.cur_goal_idx[self.lookat_id].cpu().item():
+            if i < cur_idx:
+                gymutil.draw_lines(sphere_geom_passed, self.gym, self.viewer, self.envs[self.lookat_id], pose)
+            elif i == cur_idx:
                 gymutil.draw_lines(sphere_geom_cur, self.gym, self.viewer, self.envs[self.lookat_id], pose)
                 if self.reached_goal_ids[self.lookat_id]:
                     gymutil.draw_lines(sphere_geom_reached, self.gym, self.viewer, self.envs[self.lookat_id], pose)
+            elif i == cur_idx + 1 and (cur_idx + 1) < n_goals:
+                gymutil.draw_lines(sphere_geom_next, self.gym, self.viewer, self.envs[self.lookat_id], pose)
             else:
-                gymutil.draw_lines(sphere_geom, self.gym, self.viewer, self.envs[self.lookat_id], pose)
+                gymutil.draw_lines(sphere_geom_default, self.gym, self.viewer, self.envs[self.lookat_id], pose)
         
         if not self.cfg.depth.use_camera:
             sphere_geom_arrow = gymutil.WireframeSphereGeometry(0.02, 16, 16, None, color=(1, 0.35, 0.25))
@@ -1307,6 +1555,177 @@ class LeggedRobot(BaseTask):
                     gymutil.draw_lines(edge_geom, self.gym, self.viewer, env_handle, pose)
                 else:
                     gymutil.draw_lines(non_edge_geom, self.gym, self.viewer, env_handle, pose)
+
+    def _draw_commands(self, env_id=None):
+        """
+        Visualize commands for one env:
+          - linear command (vx, vy) as arrow (shaft + head)
+          - angular command wz as an arc around the robot (signed arc angle)
+        Default: draw only for lookat_id (avoid drawing all envs for perf).
+        """
+        if not hasattr(self, "commands"):
+            return
+        if env_id is None:
+            env_id = self.lookat_id
+        try:
+            i = int(env_id)
+        except Exception:
+            i = int(self.lookat_id)
+        env_handle = self.envs[i]
+
+        # get base pose and commands (CPU/numpy)
+        base_pos = self.root_states[i, :3].cpu().numpy()
+        yaw = float(self.yaw[i].cpu().item())
+        vx = float(self.commands[i, 0].cpu().item())
+        vy = float(self.commands[i, 1].cpu().item())
+        wz = float(self.commands[i, 2].cpu().item())
+
+        # visualization scaling (meters per m/s for the arrow)
+        lv_scale = getattr(self.cfg.viewer, "command_viz_lin_scale", 0.6)  # meters per (m/s)
+        wz_scale = getattr(self.cfg.viewer, "command_viz_wz_scale", 1.0)   # radians per (rad/s) visualized arc angle
+        arc_radius = getattr(self.cfg.viewer, "command_viz_arc_radius", 0.25)  # radius of arc for wz visualization
+
+        # compute arrow tip in world frame (rotate by yaw)
+        cos_y = np.cos(yaw); sin_y = np.sin(yaw)
+        dx = vx * cos_y - vy * sin_y
+        dy = vx * sin_y + vy * cos_y
+        tip = base_pos + np.array([dx * lv_scale, dy * lv_scale, 0.0], dtype=np.float32)
+
+        # build arrow vertices (shaft and two head points)
+        shaft_p0 = np.array([base_pos[0], base_pos[1], base_pos[2] + 0.02], dtype=np.float32)
+        shaft_p1 = np.array([tip[0], tip[1], tip[2] + 0.02], dtype=np.float32)
+
+        # arrow head: two small lines
+        dir_vec = np.array([shaft_p1[0] - shaft_p0[0], shaft_p1[1] - shaft_p0[1]], dtype=np.float32)
+        norm = np.linalg.norm(dir_vec)
+        if norm < 1e-4:
+            head_p1 = shaft_p1 + np.array([0.03, 0.0, 0.0], dtype=np.float32)
+            head_p2 = shaft_p1 + np.array([-0.03, 0.0, 0.0], dtype=np.float32)
+        else:
+            head_dir = dir_vec / norm
+            perp = np.array([-head_dir[1], head_dir[0]])
+            head_size = lv_scale * 0.2
+            head_p1 = shaft_p1 - np.concatenate([head_dir * head_size, [0.0]]) + np.concatenate([perp * head_size * 0.6, [0.0]])
+            head_p2 = shaft_p1 - np.concatenate([head_dir * head_size, [0.0]]) - np.concatenate([perp * head_size * 0.6, [0.0]])
+
+        arrow_points = np.stack([shaft_p0, shaft_p1, head_p1, head_p2], axis=0)
+        arrow_indices = np.array([[0, 1], [1, 2], [1, 3]], dtype=np.int32)
+
+        # color: blue if env has goal else green
+        color = (0.0, 0.5, 1.0) if (hasattr(self, "env_has_goals") and self.env_has_goals[i]) else (0.0, 1.0, 0.0)
+
+        # create simple line geometry
+        class SimpleLineGeom:
+            def __init__(self, points, indices, color):
+                self.points = np.array(points, dtype=np.float32)
+                self.indices = np.array(indices, dtype=np.int32)
+                self._colors = np.tile(np.array(color, dtype=np.float32), (len(self.indices), 1))
+            def num_lines(self):
+                return len(self.indices)
+            def colors(self):
+                return self._colors
+            def instance_verts(self, pose):
+                # pose.p unused; points are absolute world coords
+                verts = np.empty((len(self.indices) * 2, 3), dtype=np.float32)
+                for idx, (a, b) in enumerate(self.indices):
+                    verts[2*idx] = self.points[a]
+                    verts[2*idx+1] = self.points[b]
+                return verts
+
+        # draw arrow (linear command)
+        arrow_geom = SimpleLineGeom(arrow_points, arrow_indices, color)
+        try:
+            gymutil.draw_lines(arrow_geom, self.gym, self.viewer, env_handle, gymapi.Transform())
+        except Exception:
+            pass
+
+        # draw angular command as arc (wz)
+        # map wz to arc angle
+        arc_angle = float(np.clip(wz * wz_scale, -np.pi, np.pi))
+        if abs(arc_angle) > 1e-4:
+            n_seg = 16
+            # center on robot (slightly above base)
+            center = base_pos.copy(); center[2] += 0.05
+            # starting angle aligned with robot forward
+            start_angle = yaw - arc_angle/2.0
+            thetas = np.linspace(start_angle, start_angle + arc_angle, n_seg)
+            arc_pts = []
+            for th in thetas:
+                x = center[0] + arc_radius * np.cos(th)
+                y = center[1] + arc_radius * np.sin(th)
+                arc_pts.append([x, y, center[2]])
+            arc_pts = np.array(arc_pts, dtype=np.float32)
+            arc_indices = np.stack([np.arange(0, n_seg-1), np.arange(1, n_seg)], axis=1).astype(np.int32)
+            arc_color = (1.0, 0.4, 0.2) if arc_angle > 0 else (1.0, 0.2, 1.0)
+            arc_geom = SimpleLineGeom(arc_pts, arc_indices, arc_color)
+            try:
+                gymutil.draw_lines(arc_geom, self.gym, self.viewer, env_handle, gymapi.Transform())
+            except Exception:
+                pass
+
+    def _draw_env_bounds(self, env_id=None):
+        """
+        可视化逻辑边界：使用真实线段绘制（通过 draw_lines helper -> gym.add_lines）
+        env_id: int or None -> 若为 None 使用 lookat_id
+        """
+        if not hasattr(self, "env_bounds") or self.env_bounds is None:
+            return
+        if env_id is None:
+            env_id = self.lookat_id
+        try:
+            b = self.env_bounds[env_id].cpu().numpy()
+            x_min, x_max, y_min, y_max = b
+        except Exception:
+            return
+        # 在地面略微抬高 z 以便能看到
+        z = float(self.env_origins[env_id, 2].cpu().item()) + 0.05
+        env_handle = self.envs[env_id]
+        # 四个角（按顺时针），使用绝对坐标（相对于 env）
+        corners = np.array([
+            [x_min, y_min, z],
+            [x_max, y_min, z],
+            [x_max, y_max, z],
+            [x_min, y_max, z],
+        ], dtype=np.float32)
+        # 线段对（每行一个线段，索引对应 corners）
+        line_indices = np.array([[0, 1], [1, 2], [2, 3], [3, 0]], dtype=np.int32)
+        # 简易 LineGeometry，满足 instance_verts(pose), num_lines(), colors()
+        class SimpleLineGeom:
+            def __init__(self, points, indices, color):
+                self.points = np.array(points, dtype=np.float32)
+                self.indices = np.array(indices, dtype=np.int32)
+                self._colors = np.tile(np.array(color, dtype=np.float32), (len(self.indices), 1))
+            def num_lines(self):
+                return len(self.indices)
+            def colors(self):
+                return self._colors
+            def instance_verts(self, pose):
+                # pose 可能包含位移（通常我们传零位移），这里简单将 points + pose.p
+                t = np.array([pose.p.x, pose.p.y, pose.p.z], dtype=np.float32)
+                verts = np.empty((len(self.indices) * 2, 3), dtype=np.float32)
+                for i, (a, b) in enumerate(self.indices):
+                    verts[2 * i] = self.points[a] + t
+                    verts[2 * i + 1] = self.points[b] + t
+                return verts
+        # 颜色：红色
+        color = [1.0, 0.0, 0.0]
+        geom = SimpleLineGeom(corners, line_indices, color)
+        # 使用用户给出的 draw_lines helper（内部会调用 gym.add_lines）
+        # pose 设为零平移（因为我们在 geom 中使用的是绝对坐标）
+        pose = gymapi.Transform()
+        try:
+            gymutil.draw_lines(geom, self.gym, self.viewer, env_handle, pose)
+        except Exception:
+            num_points_per_edge = getattr(self.cfg.env, "env_bound_line_points", 20)
+            point_radius = getattr(self.cfg.env, "env_bound_point_radius", 0.03)
+            sphere_geom = gymutil.WireframeSphereGeometry(point_radius, 6, 6, None, color=(1, 1, 0))
+            for i in range(4):
+                a = corners[i]
+                b = corners[(i + 1) % 4]
+                for t in np.linspace(0.0, 1.0, num_points_per_edge):
+                    p = a * (1.0 - t) + b * t
+                    sphere_pose = gymapi.Transform(gymapi.Vec3(float(p[0]), float(p[1]), float(p[2])), r=None)
+                    gymutil.draw_lines(sphere_geom, self.gym, self.viewer, env_handle, sphere_pose)
 
     def _init_height_points(self):
         """ Returns points at which the height measurments are sampled (in base frame)
@@ -1485,30 +1904,37 @@ class LeggedRobot(BaseTask):
 
     ################## parkour rewards ##################
 
-    def _reward_tracking_goal_vel(self):
-        norm = torch.norm(self.target_pos_rel, dim=-1, keepdim=True)
-        target_vec_norm = self.target_pos_rel / (norm + 1e-5)
-        cur_vel = self.root_states[:, 7:9]
-        rew = torch.minimum(torch.sum(target_vec_norm * cur_vel, dim=-1), self.commands[:, 0]) / (self.commands[:, 0] + 1e-5)
-        return rew
+    # def _reward_tracking_goal_vel(self):
+    #     norm = torch.norm(self.target_pos_rel, dim=-1, keepdim=True)
+    #     target_vec_norm = self.target_pos_rel / (norm + 1e-5)
+    #     cur_vel = self.root_states[:, 7:9]
+    #     rew = torch.minimum(torch.sum(target_vec_norm * cur_vel, dim=-1), self.commands[:, 0]) / (self.commands[:, 0] + 1e-5)
+    #     return rew
+    
+    # def _reward_tracking_yaw(self):
+    #     rew = torch.exp(-torch.abs(wrap_to_pi(self.target_yaw - self.yaw)))
+    #     return rew
         
-    def _reward_tracking_lin_vel_x(self):
-        cur_lin_vel_x = self.base_lin_vel[:, 0]
-        target_lin_vel_x = self.commands[:, 0]
-        error = cur_lin_vel_x - target_lin_vel_x
-        rew = torch.exp(-torch.square(error))
-        stop_mask = (torch.abs(target_lin_vel_x) < 0.1)
-        rew[stop_mask] *= 2.0
-        return rew
+    # def _reward_tracking_lin_vel_x(self):
+    #     cur_lin_vel_x = self.base_lin_vel[:, 0]
+    #     target_lin_vel_x = self.commands[:, 0]
+    #     error = cur_lin_vel_x - target_lin_vel_x
+    #     rew = torch.exp(-torch.square(error))
+    #     stop_mask = (torch.abs(target_lin_vel_x) < 0.1)
+    #     rew[stop_mask] *= 2.0
+    #     return rew
 
     def _reward_tracking_lin_vel(self):
         # Tracking of linear velocity commands (xy axes)
         lin_vel_error = torch.sum(torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1)
         return torch.exp(-lin_vel_error/self.cfg.rewards.tracking_sigma)
-
-    def _reward_tracking_yaw(self):
-        rew = torch.exp(-torch.abs(wrap_to_pi(self.target_yaw - self.yaw)))
-        return rew
+    
+    def _reward_tracking_ang_vel_z(self):
+        """
+        跟踪角速度命令 wz
+        """
+        ang_vel_error = torch.square(self.commands[:, 2] - self.base_ang_vel[:, 2])
+        return torch.exp(-ang_vel_error / self.cfg.rewards.tracking_sigma)
     
     def _reward_lin_vel_z(self):
         rew = torch.square(self.base_lin_vel[:, 2])
@@ -1565,12 +1991,6 @@ class LeggedRobot(BaseTask):
         # Terminal reward / penalty
         return self.reset_buf * ~self.time_out_buf
     
-    def _reward_stand_still(self):
-        # Penalize motion at zero commands
-        return torch.sum(torch.abs(self.dof_pos - self.default_dof_pos), dim=1) \
-            * (torch.norm(self.commands[:, :2], dim=1) < 0.1) \
-            * (torch.abs(self.commands[:, 2]) < 0.2)
-    
     def _reward_feet_air_time(self):
         # Reward long steps
         # Need to filter the contacts because the contact reporting of PhysX is unreliable on meshes
@@ -1580,17 +2000,54 @@ class LeggedRobot(BaseTask):
         first_contact = (self.feet_air_time > 0.) * contact_filt
         self.feet_air_time += self.dt
         rew_airTime = torch.sum((self.feet_air_time - 0.5) * first_contact, dim=1) # reward only on first contact with the ground
-        rew_airTime *= torch.norm(self.commands[:, :2], dim=1) > 0.1 #no reward for zero command
+        # 修改：线速度或角速度命令非零时都给予步态奖励
+        lin_vel_clip = getattr(self.cfg.commands, 'lin_vel_clip', 0.1)
+        ang_vel_clip = getattr(self.cfg.commands, 'ang_vel_clip', 0.1)
+        cmd_nonzero = torch.logical_or(
+            torch.norm(self.commands[:, :2], dim=1) > lin_vel_clip,
+            torch.abs(self.commands[:, 2]) > ang_vel_clip
+        )
+        rew_airTime *= cmd_nonzero.float()
         self.feet_air_time *= ~contact_filt
         return rew_airTime
     
     def _reward_lazy_stop(self):
-        # Penalize too slow when command is not below cutoff threshold
-        return (torch.norm(self.root_states[:, 7:9] - self.commands[:, :2], dim=1) > getattr(self.cfg.commands, "lin_cmd_cutoff", 0.2)) \
-            * torch.logical_or(
-                (torch.norm(self.commands[:, :2], dim=1) > getattr(self.cfg.commands, "lin_vel_clip", 0.2)),
-                (torch.abs(self.commands[:, 2]) > getattr(self.cfg.commands, "ang_yaw_clip", 0.1)),
-            )
+        """
+        惩罚：当命令非零但实际速度跟踪差时（包括线速度和角速度）
+        """
+        lin_vel_clip = getattr(self.cfg.commands, 'lin_vel_clip', 0.1)
+        ang_vel_clip = getattr(self.cfg.commands, 'ang_vel_clip', 0.1)
+        
+        # 线速度误差
+        lin_vel_error = torch.norm(self.base_lin_vel[:, :2] - self.commands[:, :2], dim=1)
+        # 角速度误差
+        ang_vel_error = torch.abs(self.base_ang_vel[:, 2] - self.commands[:, 2])
+        
+        # 线速度命令非零但跟踪差
+        lin_cmd_nonzero = torch.norm(self.commands[:, :2], dim=1) > lin_vel_clip
+        lin_penalty = (lin_vel_error > lin_vel_clip) * lin_cmd_nonzero
+        
+        # 角速度命令非零但跟踪差
+        ang_cmd_nonzero = torch.abs(self.commands[:, 2]) > ang_vel_clip
+        ang_penalty = (ang_vel_error > ang_vel_clip) * ang_cmd_nonzero
+        
+        # 综合惩罚（任一不满足都惩罚）
+        return lin_penalty.float() + ang_penalty.float()
+    
+    def _reward_stand_still(self):
+        """
+        惩罚：当命令为零时机器人仍在运动
+        """
+        lin_vel_clip = getattr(self.cfg.commands, 'lin_vel_clip', 0.1)
+        ang_vel_clip = getattr(self.cfg.commands, 'ang_vel_clip', 0.1)
+        
+        # 命令接近零
+        cmd_near_zero = torch.logical_and(
+            torch.norm(self.commands[:, :2], dim=1) < lin_vel_clip,
+            torch.abs(self.commands[:, 2]) < ang_vel_clip
+        )
+        
+        return torch.sum(torch.abs(self.dof_pos - self.default_dof_pos), dim=1) * cmd_near_zero.float()
     
     def _reward_base_height(self):
         # Penalize base height away from target
