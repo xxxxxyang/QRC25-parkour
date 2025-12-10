@@ -666,45 +666,45 @@ class LeggedRobot(BaseTask):
         y_ratio = getattr(self.cfg.commands, 'goal_y_ratio', 0.5)
         yaw_ratio = getattr(self.cfg.commands, 'goal_yaw_ratio', 1.0)
         
-        # 计算 vx 命令
+        # 计算 vx 命令 (per-env clip)
         x_cmd = torch.clip(
             target_local[:, 0] * x_ratio,
-            min=self.command_ranges["lin_vel_x"][0],
-            max=self.command_ranges["lin_vel_x"][1],
+            min=self.command_ranges["lin_vel_x"][:, 0],  # shape: (num_envs,)
+            max=self.command_ranges["lin_vel_x"][:, 1],  # shape: (num_envs,)
         )
         
-        # 计算 vy 命令
+        # 计算 vy 命令 (per-env clip)
         y_cmd = torch.clip(
             target_local[:, 1] * y_ratio,
-            min=self.command_ranges["lin_vel_y"][0],
-            max=self.command_ranges["lin_vel_y"][1],
+            min=self.command_ranges["lin_vel_y"][:, 0],
+            max=self.command_ranges["lin_vel_y"][:, 1],
         )
         
-        # 计算 wz 命令（角速度）
+        # 计算 wz 命令（角速度）(per-env clip)
         wz_cmd = torch.clip(
             target_yaw_local * yaw_ratio,
-            min=self.command_ranges["ang_vel_z"][0],
-            max=self.command_ranges["ang_vel_z"][1],
+            min=self.command_ranges["ang_vel_z"][:, 0],
+            max=self.command_ranges["ang_vel_z"][:, 1],
         )
         
         # 应用命令截断
         lin_vel_clip = getattr(self.cfg.commands, 'lin_vel_clip', 0.2)
         ang_vel_clip = getattr(self.cfg.commands, 'ang_vel_clip', 0.1)
         
-        x_cmd[torch.abs(x_cmd) < lin_vel_clip] = 0.
-        y_cmd[torch.abs(y_cmd) < lin_vel_clip] = 0.
-        wz_cmd[torch.abs(wz_cmd) < ang_vel_clip] = 0.
+        x_cmd = torch.where(torch.abs(x_cmd) < lin_vel_clip, torch.zeros_like(x_cmd), x_cmd)
+        y_cmd = torch.where(torch.abs(y_cmd) < lin_vel_clip, torch.zeros_like(y_cmd), y_cmd)
+        wz_cmd = torch.where(torch.abs(wz_cmd) < ang_vel_clip, torch.zeros_like(wz_cmd), wz_cmd)
         
         # 可选：当偏差过大时停止前进
         x_stop_by_yaw_threshold = getattr(self.cfg.commands, 'x_stop_by_yaw_threshold', None)
         if x_stop_by_yaw_threshold is not None:
             large_yaw_mask = torch.abs(target_yaw_local) > x_stop_by_yaw_threshold
-            x_cmd[large_yaw_mask & env_mask] = 0.
+            x_cmd = torch.where(large_yaw_mask & env_mask, torch.zeros_like(x_cmd), x_cmd)
         
         # 仅更新有 goals 的环境
         self.commands[env_mask, 0] = x_cmd[env_mask]
         self.commands[env_mask, 1] = y_cmd[env_mask]
-        self.commands[env_mask, 2] = wz_cmd[env_mask]  # 角速度
+        self.commands[env_mask, 2] = wz_cmd[env_mask]
         
     def _gather_cur_goals(self, future=0):
         return self.env_goals.gather(1, (self.cur_goal_idx[:, None, None]+future).expand(-1, -1, self.env_goals.shape[-1])).squeeze(1)
