@@ -76,13 +76,22 @@ class Go2BaseCfg( LeggedRobotCfg ):
         base_height_target = 0.25
         class scales( LeggedRobotCfg.rewards.scales ):
             # tracking_goal_vel = 0
-            tracking_lin_vel = 1.5
+            # tracking_lin_vel = 1.5
+            tracking_lin_vel_forward = 1.5   # 前向权重更高
+            tracking_lin_vel_backward = 0.5  # 后向权重较低
+            tracking_ang_vel_z = 1.0
+            # regularization rewards
+            lin_vel_z = -1.5
             stand_still = -0.2
             orientation = -1.5
-            feet_air_time = 1.0
-            lazy_stop = -1.0
-            dof_error = -0.1
+            feet_air_time = 3.0 # 1.0(滞空时间太短) 5.0(base-11)训不出来
+            feet_min_contact_time = -1.0
+            gait_periodicity = 0.5
+            feet_contact_balance = -0.5
+            lazy_stop = -3.0
+            dof_error = -0.2
             base_height = -0.1
+            torques = -0.00002
 
     class depth( LeggedRobotCfg.depth ):
         # position = [0.32, 0.0, 0.035]  # front camera
@@ -100,6 +109,8 @@ class Go2BaseCfg( LeggedRobotCfg ):
         near_plane = 0.1
 
     class terrain( LeggedRobotCfg.terrain ):
+        add_terrain_border = True
+        border_type = 'wall'
         curriculum = True 
         # more rough
         downsampled_scale = 0.06
@@ -125,14 +136,25 @@ class Go2BaseCfg( LeggedRobotCfg ):
                         "parkour_gap": 0.,
                         "demo": 0.,}
         terrain_proportions = list(terrain_dict.values())
+        num_rows = 10
+        num_cols = 20
 
     class commands( LeggedRobotCfg.commands ):
         curriculum = True
+        lin_vel_clip = 0.2+1e-7 # [m/s]
+        ang_vel_clip = 0.2+1e-7 # [rad/s]
+        min_ratio = 0.5
+        initial_dead_zone = {
+            "lin_vel_x": 0.5,
+            "lin_vel_y": 0.0,
+            "ang_vel_z": 0.0
+        }
         class max_ranges( LeggedRobotCfg.commands.max_ranges ):
             # lin_vel_x = [0.3, 0.8]  # [m/s]
-            lin_vel_x = [-1.0, 1.5]  # [m/s]
-            lin_vel_y = [-0.5, 0.5]  # [m/s]
-            ang_yaw = [-1, 1]  # [rad]
+            lin_vel_x = [-1.5, 1.8]  # [m/s]
+            # lin_vel_y = [-1.0, 1.0]  # [m/s]
+            lin_vel_y = [-0.0, 0.0]
+            ang_vel_z = [-1., 1.]    # min max [rad/s]
 
     class domain_rand( LeggedRobotCfg.domain_rand ):
         randomize_friction = True

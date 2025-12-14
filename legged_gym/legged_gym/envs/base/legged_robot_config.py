@@ -177,7 +177,7 @@ class LeggedRobotCfg(BaseConfig):
         terrain_length = 18.
         terrain_width = 6
         num_rows = 10 # number of terrain rows (levels)  # spreaded is benifitiall !
-        num_cols = 40 # number of terrain cols (types)
+        num_cols = 20 # number of terrain cols (types)
         
         terrain_dict = {"smooth slope": 0., 
                         "rough slope up": 0.0,
@@ -203,7 +203,7 @@ class LeggedRobotCfg(BaseConfig):
         
         # trimesh only:
         slope_treshold = 1.5# slopes above this threshold will be corrected to vertical surfaces
-        origin_zero_z = True
+        origin_zero_z = False
 
         num_goals = 8
 
@@ -215,9 +215,20 @@ class LeggedRobotCfg(BaseConfig):
         heading_resampling_time = 4*resampling_time # 如果使用heading_command, yaw command 的更新间隔 [s]
         heading_command = False # use command to calculate target yaw
 
+        tracking_avg_alpha = 0.05
+        ang_vel_enable_threshold = 0.6
+        ang_vel_disable_threshold = 0.3
+
         # min command scale clip
         lin_vel_clip = 0.1 # [m/s]
         ang_vel_clip = 0.05 # [rad]
+
+        min_ratio = 0.5
+        initial_dead_zone = {
+            "lin_vel_x": 0.3,
+            "lin_vel_y": 0.0,
+            "ang_vel_z": 0.0
+        }
         # Easy ranges
         class ranges:
             lin_vel_x = [0., 1.5] # min max [m/s]
@@ -226,7 +237,7 @@ class LeggedRobotCfg(BaseConfig):
 
         # Hard ranges
         class max_ranges:
-            lin_vel_x = [-0.3, 1.8] # min max [m/s]
+            lin_vel_x = [-1.0, 1.8] # min max [m/s]
             lin_vel_y = [-0.3, 0.3]#[0.15, 0.6]   # min max [m/s]
             ang_vel_z = [-1., 1.]    # min max [rad]
 
@@ -303,7 +314,9 @@ class LeggedRobotCfg(BaseConfig):
             # tracking rewards
             # tracking_goal_vel = 1.5
             # tracking_yaw = 0.5
-            tracking_lin_vel = 1.5
+            # tracking_lin_vel = 1.5
+            tracking_lin_vel_forward = 3.0   # 前向权重更高
+            tracking_lin_vel_backward = 1.5  # 后向权重较低
             tracking_ang_vel_z = 0.5
             # regularization rewards
             lin_vel_z = -1.0
@@ -318,12 +331,16 @@ class LeggedRobotCfg(BaseConfig):
             dof_error = -0.04
             feet_stumble = -1
             feet_edge = -1
+            feet_air_time = 1.5
+            feet_min_contact_time = -1.0
+            gait_periodicity = 0.5
+            feet_contact_balance = -0.5
             lazy_stop = -0.5
             stand_still = -0.5
             termination = -0.0
             
         only_positive_rewards = True # if true negative total rewards are clipped at zero (avoids early termination problems)
-        tracking_sigma = 0.2 # tracking reward = exp(-error^2/sigma)
+        tracking_sigma = 0.1 # tracking reward = exp(-error^2/sigma)
         soft_dof_pos_limit = 1. # percentage of urdf limits, values above this limit are penalized
         soft_dof_vel_limit = 1
         soft_torque_limit = 0.4

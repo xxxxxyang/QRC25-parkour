@@ -178,10 +178,10 @@ class Terrain:
                 interval=(0, self.proportions[0]),
                 idx_fn=lambda: 1 if choice < self.proportions[0] / 2 else 0,
                 build=lambda: (
-                    terrain_utils.pyramid_sloped_terrain(
+                    parkour_sloped_terrain(
                         terrain,
                         slope=ctx["slope"] * (-1 if choice < self.proportions[0] / 2 else 1),
-                        platform_size=3.
+                        platform_size=2.
                     )
                 ),
                 rough=False,
@@ -192,10 +192,10 @@ class Terrain:
                 interval=(self.proportions[0], self.proportions[2]),
                 idx_fn=lambda: 3 if choice < self.proportions[1] else 2,
                 build=lambda: (
-                    terrain_utils.pyramid_sloped_terrain(
+                    parkour_sloped_terrain(
                         terrain,
                         slope=ctx["slope"] * (-1 if choice < self.proportions[1] else 1),
-                        platform_size=3.
+                        platform_size=2.
                     )
                 ),
                 rough=True,
@@ -494,19 +494,44 @@ class Terrain:
         
         env_origin_y = (j + 0.5) * self.env_width
         
-        x1 = int((self.env_length/2. - 0.5) / terrain.horizontal_scale) # within 1 meter square range
-        x2 = int((self.env_length/2. + 0.5) / terrain.horizontal_scale)
-        y1 = int((self.env_width/2. - 0.5) / terrain.horizontal_scale)
-        y2 = int((self.env_width/2. + 0.5) / terrain.horizontal_scale)
+        # 计算 env_origin_x, env_origin_y 对应的地形像素坐标（相对于当前子地形）
+        local_x_px = int((env_origin_x - i * self.env_length) / terrain.horizontal_scale)
+        local_y_px = int((env_origin_y - j * self.env_width) / terrain.horizontal_scale)
+        
+        # 确保像素坐标在有效范围内
+        local_x_px = np.clip(local_x_px, 0, terrain.height_field_raw.shape[0] - 1)
+        local_y_px = np.clip(local_y_px, 0, terrain.height_field_raw.shape[1] - 1)
+        
+        # 在该点周围取一个小区域的最大高度（避免恰好在边缘或坑里）
+        sample_radius_m = getattr(self.cfg, "spawn_sample_radius", 0.5)  # meters
+        sample_radius = max(1, int(round(sample_radius_m / terrain.horizontal_scale)))
+        x1 = max(0, local_x_px - sample_radius)
+        x2 = min(terrain.height_field_raw.shape[0], local_x_px + sample_radius + 1)
+        y1 = max(0, local_y_px - sample_radius)
+        y2 = min(terrain.height_field_raw.shape[1], local_y_px + sample_radius + 1)
+        
         if self.cfg.origin_zero_z:
             env_origin_z = 0
         else:
-            env_origin_z = np.max(terrain.height_field_raw[x1:x2, y1:y2])*terrain.vertical_scale
+            # Using median reduces the risk of spawning above nearby walls; fallbacks to center if needed
+            local_window = terrain.height_field_raw[x1:x2, y1:y2]
+            if local_window.size == 0:
+                local_height = float(terrain.height_field_raw[local_x_px, local_y_px]) * terrain.vertical_scale
+            else:
+                median_h = float(np.median(local_window))
+                center_h = float(terrain.height_field_raw[local_x_px, local_y_px])
+                # If center is a deep pit value and median is higher, use median; else prefer center
+                if center_h < median_h - (0.1 / terrain.vertical_scale):
+                    local_height = median_h * terrain.vertical_scale
+                else:
+                    local_height = center_h * terrain.vertical_scale
+            spawn_height_offset = getattr(self.cfg, 'spawn_height_offset', 0.01)
+            env_origin_z = local_height + spawn_height_offset
+        
         self.env_origins[i, j] = [env_origin_x, env_origin_y, env_origin_z]
         self.terrain_type[i, j] = terrain.idx
         self.goals[i, j, :, :2] = terrain.goals + [i * self.env_length, j * self.env_width]
         self.has_goals[i, j] = has_goals
-        # self.env_slope_vec[i, j] = terrain.slope_vector
 
 def gap_terrain(terrain, gap_size, platform_size=1.):
     gap_size = int(gap_size / terrain.horizontal_scale)
@@ -896,6 +921,45 @@ def parkour_stair_terrain(terrain,
     goals[-1] = [x_end, mid_y]
     terrain.goals = goals * terrain.horizontal_scale
 
+    return terrain
+
+def parkour_sloped_terrain(terrain, slope=1, platform_size=1.):
+    """
+    Generate a sloped terrain
+
+    Parameters:
+        terrain (terrain): the terrain
+        slope (int): positive or negative slope
+        platform_size (float): size of the flat platform at the center of the terrain [meters]
+    Returns:
+        terrain (SubTerrain): update terrain
+    """
+    x = np.arange(0, terrain.width)
+    y = np.arange(0, terrain.length)
+    center_x = int(terrain.width / 2)
+    center_y = int(terrain.length / 2)
+    xx, yy = np.meshgrid(x, y, sparse=True)
+    xx = (center_x - np.abs(center_x-xx)) / center_x
+    yy = (center_y - np.abs(center_y-yy)) / center_y
+    xx = xx.reshape(terrain.width, 1)
+    yy = yy.reshape(1, terrain.length)
+
+    max_height = int(slope * (terrain.horizontal_scale / terrain.vertical_scale) * (terrain.width / 2))
+    terrain.height_field_raw += (max_height * xx * yy).astype(terrain.height_field_raw.dtype)
+
+    platform_size = int(platform_size / terrain.horizontal_scale / 2)
+    x1 = terrain.width // 2 - platform_size
+    x2 = terrain.width // 2 + platform_size
+    y1 = terrain.length // 2 - platform_size
+    y2 = terrain.length // 2 + platform_size
+
+    min_h = min(terrain.height_field_raw[x1, y1], 0)
+    max_h = max(terrain.height_field_raw[x1, y1], 0)
+    terrain.height_field_raw = np.clip(terrain.height_field_raw, min_h, max_h)
+    if slope < 0:
+        raise_mul = 1.0  # 抬升高度
+        raise_amount = int(round(abs(max_height) * raise_mul))
+        terrain.height_field_raw = terrain.height_field_raw + raise_amount
     return terrain
 
 def demo_terrain(terrain):

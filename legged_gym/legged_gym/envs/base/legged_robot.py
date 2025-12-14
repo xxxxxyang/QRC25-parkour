@@ -296,14 +296,20 @@ class LeggedRobot(BaseTask):
 
         self.compute_observations() # in some cases a simulation step might be required to refresh some obs (for example body positions)
 
-        # self.episode_traveled_distance += torch.norm(self.root_states[:, 7:9], dim=-1) * self.dt
-        # # 累积理论最大可达距离（基于命令速度幅值）
-        # cmd_speed = torch.norm(self.commands[:, :2], dim=-1)
-        # self.episode_max_possible_distance += cmd_speed * self.dt
-        self.last_actions[:] = self.actions[:]
-        self.last_dof_vel[:] = self.dof_vel[:]
-        self.last_torques[:] = self.torques[:]
-        self.last_root_vel[:] = self.root_states[:, 7:13]
+        self.episode_traveled_distance += torch.norm(self.root_states[:, 7:9], dim=-1) * self.dt
+        # 累积理论最大可达距离（基于命令速度幅值）
+        cmd_speed = torch.norm(self.commands[:, :2], dim=-1)
+        self.episode_max_possible_distance += cmd_speed * self.dt
+        # 新增：累积命令跟踪误差（线速度 + 角速度）
+        lin_vel_error = torch.norm(self.base_lin_vel[:, :2] - self.commands[:, :2], dim=1)
+        ang_vel_error = torch.abs(self.base_ang_vel[:, 2] - self.commands[:, 2])
+        self.episode_cmd_tracking_error += (lin_vel_error + 0.5 * ang_vel_error) * self.dt
+        # 累积跟踪奖励（使用 exp 形式，与 reward 一致）
+        tracking_sigma = self.cfg.rewards.tracking_sigma
+        lin_tracking_rew = torch.exp(-torch.sum(torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1) / tracking_sigma)
+        ang_tracking_rew = torch.exp(-torch.square(self.commands[:, 2] - self.base_ang_vel[:, 2]) / tracking_sigma)
+        self.episode_cmd_tracking_reward += (lin_tracking_rew + ang_tracking_rew) * 0.5
+        self.episode_step_count += 1
 
         if self.viewer and self.enable_viewer_sync and self.debug_viz:
             self.gym.clear_lines(self.viewer)
@@ -395,6 +401,8 @@ class LeggedRobot(BaseTask):
         self.action_history_buf[env_ids, :, :] = 0.
         self.cur_goal_idx[env_ids] = 0
         self.reach_goal_timer[env_ids] = 0
+        self.episode_traveled_distance[env_ids] = 0.
+        self.episode_max_possible_distance[env_ids] = 0.
 
         # fill extras
         self.extras["episode"] = {}
@@ -413,6 +421,13 @@ class LeggedRobot(BaseTask):
         # send timeout info to the algorithm
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf
+        if hasattr(self, 'lin_vel_tracking_reward_avg'):
+            self.lin_vel_tracking_reward_avg[env_ids] = 0.0
+            # 有 goals 的环境重置后直接启用角速度，无 goals 的先禁用
+            if hasattr(self, 'env_has_goals'):
+                self.ang_vel_enabled[env_ids] = self.env_has_goals[env_ids]
+            else:
+                self.ang_vel_enabled[env_ids] = False
         
     def compute_reward(self):
         """ Compute rewards
@@ -627,26 +642,74 @@ class LeggedRobot(BaseTask):
         if self.cfg.domain_rand.push_robots and  (self.common_step_counter % self.cfg.domain_rand.push_interval == 0):
             self._push_robots()
 
+    # def _update_commands_based_on_goals(self):
+    #     """
+    #     根据当前地形是否有 goals 来更新命令：
+    #     - 有 goals：基于目标位置生成命令
+    #     - 无 goals：使用随机采样的命令
+    #     """
+    #     # 获取有 goals 和无 goals 的环境 mask
+    #     has_goals_mask = self.env_has_goals
+    #     no_goals_mask = ~has_goals_mask
+        
+    #     # 对于有 goals 的环境，基于目标生成命令
+    #     if has_goals_mask.any():
+    #         self._update_goal_based_commands(has_goals_mask)
+        
+    #     # 对于无 goals 的环境，按时间间隔重采样随机命令
+    #     if no_goals_mask.any():
+    #         resample_mask = (self.episode_length_buf % int(self.cfg.commands.resampling_time / self.dt) == 0) & no_goals_mask
+    #         resample_ids = resample_mask.nonzero(as_tuple=False).flatten()
+    #         if len(resample_ids) > 0:
+    #             self._resample_commands(resample_ids)
     def _update_commands_based_on_goals(self):
         """
         根据当前地形是否有 goals 来更新命令：
-        - 有 goals：基于目标位置生成命令
-        - 无 goals：使用随机采样的命令
+        - 有 goals：基于目标位置生成命令，始终启用角速度
+        - 无 goals：使用随机采样的命令，根据线速度跟踪质量动态启用/禁用角速度
+        角速度的范围仍由 _update_command_curriculum 根据 terrain level 控制
         """
-        # 获取有 goals 和无 goals 的环境 mask
+        # ===== 1. 获取有 goals 和无 goals 的环境 mask =====
         has_goals_mask = self.env_has_goals
         no_goals_mask = ~has_goals_mask
-        
-        # 对于有 goals 的环境，基于目标生成命令
+        # ===== 2. 对于无 goals 的环境，更新线速度跟踪奖励的滑动平均 =====
+        if no_goals_mask.any():
+            lin_vel_error = torch.sum(torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1)
+            lin_vel_reward = torch.exp(-lin_vel_error / self.cfg.rewards.tracking_sigma)
+
+            alpha = getattr(self.cfg.commands, 'tracking_avg_alpha', 0.05)
+            # 只更新无 goals 环境的滑动平均
+            self.lin_vel_tracking_reward_avg[no_goals_mask] = (
+                alpha * lin_vel_reward[no_goals_mask] + 
+                (1 - alpha) * self.lin_vel_tracking_reward_avg[no_goals_mask]
+            )
+            # ===== 3. 根据跟踪质量更新角速度启用状态（滞回逻辑，仅对无 goals 环境）=====
+            enable_threshold = getattr(self.cfg.commands, 'ang_vel_enable_threshold', 0.6)
+            disable_threshold = getattr(self.cfg.commands, 'ang_vel_disable_threshold', 0.3)
+
+            should_enable = (self.lin_vel_tracking_reward_avg > enable_threshold) & no_goals_mask
+            should_disable = (self.lin_vel_tracking_reward_avg < disable_threshold) & no_goals_mask
+
+            self.ang_vel_enabled = torch.where(should_enable, torch.ones_like(self.ang_vel_enabled), self.ang_vel_enabled)
+            self.ang_vel_enabled = torch.where(should_disable, torch.zeros_like(self.ang_vel_enabled), self.ang_vel_enabled)
+        # ===== 4. 有 goals 的环境始终启用角速度 =====
+        self.ang_vel_enabled[has_goals_mask] = True
+        # ===== 5. 对于有 goals 的环境，基于目标生成命令 =====
         if has_goals_mask.any():
             self._update_goal_based_commands(has_goals_mask)
-        
-        # 对于无 goals 的环境，按时间间隔重采样随机命令
+        # ===== 6. 对于无 goals 的环境，按时间间隔重采样随机命令 =====
         if no_goals_mask.any():
             resample_mask = (self.episode_length_buf % int(self.cfg.commands.resampling_time / self.dt) == 0) & no_goals_mask
             resample_ids = resample_mask.nonzero(as_tuple=False).flatten()
             if len(resample_ids) > 0:
                 self._resample_commands(resample_ids)
+        # ===== 7. 根据角速度启用状态，将未启用的环境角速度置零 =====
+        # 注意：角速度的范围由 _update_command_curriculum 控制，这里只是决定是否启用
+        self.commands[:, 2] = torch.where(
+            self.ang_vel_enabled,
+            self.commands[:, 2],
+            torch.zeros_like(self.commands[:, 2])
+        )
 
     def _update_goal_based_commands(self, env_mask):
         """
@@ -710,27 +773,43 @@ class LeggedRobot(BaseTask):
         return self.env_goals.gather(1, (self.cur_goal_idx[:, None, None]+future).expand(-1, -1, self.env_goals.shape[-1])).squeeze(1)
 
     def _resample_commands(self, env_ids):
-        """ Randomly select commands of some environments
-        Args:
-            env_ids (List[int]): Environments ids for which new commands are needed
         """
-        # 逐 env 采样，因为每个 env 有不同的 command_range
+        分段采样命令，但确保0值有采样概率
+        """
         for idx in env_ids:
             i = int(idx)
-            self.commands[i, 0] = torch.empty(1, device=self.device).uniform_(
-                float(self.command_ranges["lin_vel_x"][i, 0]),
-                float(self.command_ranges["lin_vel_x"][i, 1])
-            ).squeeze()
-            self.commands[i, 1] = torch.empty(1, device=self.device).uniform_(
-                float(self.command_ranges["lin_vel_y"][i, 0]),
-                float(self.command_ranges["lin_vel_y"][i, 1])
-            ).squeeze()
-            self.commands[i, 2] = torch.empty(1, device=self.device).uniform_(
-                float(self.command_ranges["ang_vel_z"][i, 0]),
-                float(self.command_ranges["ang_vel_z"][i, 1])
-            ).squeeze()
-        
-        # set small commands to zero
+            for cmd_idx, cmd_name in enumerate(["lin_vel_x", "lin_vel_y", "ang_vel_z"]):
+                # 获取边界
+                neg_outer = float(self.command_ranges[cmd_name][i, 0])
+                pos_outer = float(self.command_ranges[cmd_name][i, 1])
+                neg_inner = float(self.command_dead_zones[cmd_name][i, 0])
+                pos_inner = float(self.command_dead_zones[cmd_name][i, 1])
+                # === 关键修改：为0值分配固定概率 ===
+                # 设置0值的采样概率（10%）
+                zero_prob = 0.1
+                # 随机决定是否采样0值
+                if torch.rand(1, device=self.device).item() < zero_prob:
+                    self.commands[i, cmd_idx] = 0.0
+                    continue
+                # === 原有的分段采样逻辑 ===
+                neg_len = abs(neg_inner - neg_outer)
+                pos_len = abs(pos_outer - pos_inner)
+                total_len = neg_len + pos_len
+                if total_len < 1e-6:
+                    self.commands[i, cmd_idx] = torch.empty(1, device=self.device).uniform_(
+                        neg_outer, pos_outer
+                    ).squeeze()
+                else:
+                    rand_val = torch.rand(1, device=self.device).item()
+                    if rand_val < (neg_len / total_len):
+                        self.commands[i, cmd_idx] = torch.empty(1, device=self.device).uniform_(
+                            neg_outer, neg_inner
+                        ).squeeze()
+                    else:
+                        self.commands[i, cmd_idx] = torch.empty(1, device=self.device).uniform_(
+                            pos_inner, pos_outer
+                        ).squeeze()
+        # 原有的clip逻辑
         self.commands[env_ids, 2] *= torch.abs(self.commands[env_ids, 2]) > self.cfg.commands.ang_vel_clip
         self.commands[env_ids, :2] *= torch.abs(self.commands[env_ids, 0:1]) > self.cfg.commands.lin_vel_clip
 
@@ -833,13 +912,14 @@ class LeggedRobot(BaseTask):
         """
         分场景的 terrain curriculum：
         - 有 goals：基于目标完成率
-        - 无 goals：基于速度跟踪效率
+        - 无 goals：基于命令跟踪质量（而非存活时间或距离）
         """
         if not self.init_done:
             return
 
         move_up = torch.zeros(len(env_ids), dtype=torch.bool, device=self.device)
         move_down = torch.zeros(len(env_ids), dtype=torch.bool, device=self.device)
+        
         if hasattr(self, 'env_has_goals'):
             has_goals = self.env_has_goals[env_ids]
             no_goals = ~has_goals
@@ -849,23 +929,47 @@ class LeggedRobot(BaseTask):
                 goals_completed = self.cur_goal_idx[env_ids].float() / max(self.cfg.terrain.num_goals, 1)
                 move_up[has_goals] = goals_completed[has_goals] > 0.6
                 move_down[has_goals] = goals_completed[has_goals] < 0.2
-            # === 无 goals 的环境：基于速度跟踪效率 ===
+            
+            # === 无 goals 的环境：基于命令跟踪质量 ===
             if no_goals.any():
-                traveled = self.episode_traveled_distance[env_ids]
-                max_possible = torch.clamp(self.episode_max_possible_distance[env_ids], min=0.5)
-                efficiency = traveled / max_possible
-                # 同时考虑存活时间
+                step_count = self.episode_step_count[env_ids]
+                step_count_safe = torch.clamp(step_count, min=1.0)
+                
+                # 方法1：平均跟踪奖励（0~1 之间，越高越好）
+                avg_tracking_reward = self.episode_cmd_tracking_reward[env_ids] / step_count_safe
+                
+                # 方法2：平均跟踪误差（越低越好）
+                avg_tracking_error = self.episode_cmd_tracking_error[env_ids] / step_count_safe
+                
+                # 方法3：综合考虑存活比例（但权重很小，避免 lazy_stop 问题）
                 survival_ratio = self.episode_length_buf[env_ids].float() / self.max_episode_length
-                combined_score = 0.5 * efficiency + 0.5 * survival_ratio
-                move_up[no_goals] = combined_score[no_goals] > 0.6
-                move_down[no_goals] = combined_score[no_goals] < 0.3
+                
+                # 核心指标：平均跟踪奖励
+                # 只有跟踪得好才 level up，跟踪差就 level down
+                # 额外条件：必须存活足够长（避免刚开始就摔倒但误差低的情况）
+                min_survival_for_up = 0.3  # 至少存活 30% 的 episode
+                min_survival_for_eval = 0.1  # 至少存活 10% 才评估
+                
+                can_evaluate = survival_ratio >= min_survival_for_eval
+                
+                # Level up 条件：跟踪奖励高 且 存活足够长
+                up_condition = (avg_tracking_reward > 0.7) & (survival_ratio > min_survival_for_up) & can_evaluate
+                move_up[no_goals] = up_condition[no_goals]
+                
+                # Level down 条件：跟踪奖励低 或 存活太短
+                down_condition = ((avg_tracking_reward < 0.4) | (survival_ratio < min_survival_for_up)) & can_evaluate
+                # 如果存活太短无法评估，也 level down
+                down_condition = down_condition | (~can_evaluate)
+                move_down[no_goals] = down_condition[no_goals]
         else:
-            # 兜底：只用速度效率
-            traveled = self.episode_traveled_distance[env_ids]
-            max_possible = torch.clamp(self.episode_max_possible_distance[env_ids], min=0.5)
-            efficiency = traveled / max_possible
-            move_up = efficiency > 0.7
-            move_down = efficiency < 0.3
+            # 兜底：使用跟踪奖励
+            step_count = self.episode_step_count[env_ids]
+            step_count_safe = torch.clamp(step_count, min=1.0)
+            avg_tracking_reward = self.episode_cmd_tracking_reward[env_ids] / step_count_safe
+            survival_ratio = self.episode_length_buf[env_ids].float() / self.max_episode_length
+            
+            move_up = (avg_tracking_reward > 0.7) & (survival_ratio > 0.3)
+            move_down = (avg_tracking_reward < 0.4) | (survival_ratio < 0.1)
 
         self.terrain_levels[env_ids] += 1 * move_up - 1 * move_down
         self.terrain_levels[env_ids] = torch.where(
@@ -892,42 +996,57 @@ class LeggedRobot(BaseTask):
 
     def _update_command_curriculum(self, env_ids):
         """
-        基于 terrain_levels 更新命令范围（curriculum）
+        基于 terrain_levels 更新命令范围（分段curriculum）
+
+        设计原则：
+        - 初始范围（低难度）：命令从两个不包含0的分段区间开始采样
+          负向：[max_neg * min_ratio, -dead_zone]
+          正向：[dead_zone, max_pos * min_ratio]
+        - 范围扩展：随难度增加，两个区间向两侧对称扩张
+        - 最终范围：覆盖完整的 max_range，包括0附近
         """
         if not self.init_done:
             return
-        
         terrain_levels = self.terrain_levels[env_ids]
         max_level = self.max_terrain_level - 1
-        
+        # 计算难度比例 [0, 1]
         level_ratio = torch.clamp(terrain_levels.float() / max(max_level, 1), 0.0, 1.0)
-        
-        min_ratio = 0.3
-        command_scale = min_ratio + (1.0 - min_ratio) * level_ratio
-        
-        # 获取 max_ranges
-        max_lin_vel_x = self.command_max_ranges["lin_vel_x"]
-        max_lin_vel_y = self.command_max_ranges["lin_vel_y"]
-        max_ang_vel_z = self.command_max_ranges["ang_vel_z"]
-        
-        # 逐 env 更新（张量索引赋值）
-        self.command_ranges["lin_vel_x"][env_ids, 0] = max_lin_vel_x[0] * command_scale
-        self.command_ranges["lin_vel_x"][env_ids, 1] = max_lin_vel_x[1] * command_scale
-        
-        self.command_ranges["lin_vel_y"][env_ids, 0] = max_lin_vel_y[0] * command_scale
-        self.command_ranges["lin_vel_y"][env_ids, 1] = max_lin_vel_y[1] * command_scale
-        
-        self.command_ranges["ang_vel_z"][env_ids, 0] = max_ang_vel_z[0] * command_scale
-        self.command_ranges["ang_vel_z"][env_ids, 1] = max_ang_vel_z[1] * command_scale
-        
-        # # 可选：记录当前全局难度级别（用于 log / monitor）
-        # mean_level = torch.mean(self.terrain_levels.float())
-        # mean_scale = min_ratio + (1.0 - min_ratio) * (mean_level / max(max_level, 1))
-        # if hasattr(self, 'extras') and isinstance(self.extras, dict):
-        #     if "episode" not in self.extras:
-        #         self.extras["episode"] = {}
-        #     self.extras["episode"]["command_curriculum_scale"] = float(mean_scale)
-        #     self.extras["episode"]["mean_terrain_level"] = float(mean_level)
+        # 获取配置参数
+        min_ratio = self.cfg.commands.min_ratio  # 初始范围比例
+        dead_zone = self.cfg.commands.initial_dead_zone  # 初始禁区半径
+        # 遍历每个命令维度
+        for cmd_name in ["lin_vel_x", "lin_vel_y", "ang_vel_z"]:
+            max_range = self.command_max_ranges[cmd_name]
+            max_neg = max_range[0]  # 负向最大值（如 -1.0）
+            max_pos = max_range[1]  # 正向最大值（如 1.5）
+            # === 计算分段范围 ===
+            # 负向范围：从 [max_neg * min_ratio, -dead_zone] 扩展到 [max_neg, 0]
+            neg_inner = -dead_zone[cmd_name]  # 负向内边界（固定）
+            neg_outer_init = max_neg * min_ratio  # 负向外边界初始值
+            neg_outer = neg_outer_init + level_ratio * (max_neg - neg_outer_init)
+            # 正向范围：从 [dead_zone, max_pos * min_ratio] 扩展到 [0, max_pos]
+            pos_inner = dead_zone[cmd_name]  # 正向内边界（固定）
+            pos_outer_init = max_pos * min_ratio  # 正向外边界初始值
+            pos_outer = pos_outer_init + level_ratio * (max_pos - pos_outer_init)
+            # 内边界随难度收缩到0
+            # 当 level_ratio=1 时，neg_inner→0, pos_inner→0
+            neg_inner_current = -dead_zone[cmd_name] * (1.0 - level_ratio)
+            pos_inner_current = dead_zone[cmd_name] * (1.0 - level_ratio)
+            # 存储分段范围（后续采样时使用）
+            # 格式：[neg_outer, neg_inner, pos_inner, pos_outer]
+            # 例如：level_ratio=0 时 → [-0.3, -0.3, 0.3, 0.45]
+            #       level_ratio=1 时 → [-1.0, 0, 0, 1.5]
+            self.command_ranges[cmd_name][env_ids, 0] = neg_outer
+            self.command_ranges[cmd_name][env_ids, 1] = pos_outer
+            # 将内边界存储到额外的tensor（用于采样逻辑）
+            if not hasattr(self, 'command_dead_zones'):
+                self.command_dead_zones = {
+                    "lin_vel_x": torch.zeros(self.num_envs, 2, device=self.device),
+                    "lin_vel_y": torch.zeros(self.num_envs, 2, device=self.device),
+                    "ang_vel_z": torch.zeros(self.num_envs, 2, device=self.device),
+                }
+            self.command_dead_zones[cmd_name][env_ids, 0] = neg_inner_current
+            self.command_dead_zones[cmd_name][env_ids, 1] = pos_inner_current
 
 
     #----------------------------------------
@@ -1047,16 +1166,39 @@ class LeggedRobot(BaseTask):
         # update terrain levels
         self.episode_traveled_distance = torch.zeros(self.num_envs, device=self.device, requires_grad=False)
         self.episode_max_possible_distance = torch.zeros(self.num_envs, device=self.device, requires_grad=False)
+        # 新增：累积命令跟踪误差和累积奖励
+        self.episode_cmd_tracking_error = torch.zeros(self.num_envs, device=self.device, requires_grad=False)
+        self.episode_cmd_tracking_reward = torch.zeros(self.num_envs, device=self.device, requires_grad=False)
+        self.episode_step_count = torch.zeros(self.num_envs, device=self.device, requires_grad=False)
+        # 新增：用于记录线速度跟踪奖励的滑动平均
+        self.lin_vel_tracking_reward_avg = torch.zeros(self.num_envs, device=self.device, requires_grad=False)
+        self.ang_vel_enabled = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)  # 是否启用角速度命令
 
+        # 初始化命令范围（per-env）
         self.command_ranges = {
             "lin_vel_x": torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device),
             "lin_vel_y": torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device),
             "ang_vel_z": torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device),
         }
-        # 初始化为 max_ranges
-        self.command_ranges["lin_vel_x"][:] = torch.tensor(self.command_max_ranges["lin_vel_x"], device=self.device)
-        self.command_ranges["lin_vel_y"][:] = torch.tensor(self.command_max_ranges["lin_vel_y"], device=self.device)
-        self.command_ranges["ang_vel_z"][:] = torch.tensor(self.command_max_ranges["ang_vel_z"], device=self.device)
+        # 初始化禁区边界（per-env）
+        self.command_dead_zones = {
+            "lin_vel_x": torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device),
+            "lin_vel_y": torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device),
+            "ang_vel_z": torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device),
+        }
+        # 设置初始值为最低难度的分段范围
+        dead_zone = {}
+        for cmd_name in ["lin_vel_x", "lin_vel_y", "ang_vel_z"]:
+            max_range = self.command_max_ranges[cmd_name]
+            min_ratio = self.cfg.commands.min_ratio
+            dead_zone[cmd_name] = self.cfg.commands.initial_dead_zone[cmd_name]
+            # 外边界
+            self.command_ranges[cmd_name][:, 0] = max_range[0] * min_ratio
+            self.command_ranges[cmd_name][:, 1] = max_range[1] * min_ratio
+            # 内边界（初始禁区）
+            self.command_dead_zones[cmd_name][:, 0] = -dead_zone[cmd_name]
+            self.command_dead_zones[cmd_name][:, 1] = dead_zone[cmd_name]
+        # 初始采样
         self._resample_commands(torch.arange(self.num_envs, device=self.device, requires_grad=False))
 
     def _compute_env_bounds(self):
@@ -1924,10 +2066,24 @@ class LeggedRobot(BaseTask):
     #     rew[stop_mask] *= 2.0
     #     return rew
 
-    def _reward_tracking_lin_vel(self):
-        # Tracking of linear velocity commands (xy axes)
+    def _reward_tracking_lin_vel_forward(self):
+        """追踪前向速度（vx > 0）"""
+        forward_mask = self.commands[:, 0] > 0
         lin_vel_error = torch.sum(torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1)
-        return torch.exp(-lin_vel_error/self.cfg.rewards.tracking_sigma)
+        rew = torch.exp(-lin_vel_error / self.cfg.rewards.tracking_sigma)
+        return rew * forward_mask.float()
+
+    def _reward_tracking_lin_vel_backward(self):
+        """追踪后向速度（vx < 0）"""
+        backward_mask = self.commands[:, 0] < 0
+        lin_vel_error = torch.sum(torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1)
+        rew = torch.exp(-lin_vel_error / self.cfg.rewards.tracking_sigma)
+        return rew * backward_mask.float()
+
+    # def _reward_tracking_lin_vel(self):
+    #     # Tracking of linear velocity commands (xy axes)
+    #     lin_vel_error = torch.sum(torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1)
+    #     return torch.exp(-lin_vel_error/self.cfg.rewards.tracking_sigma)
     
     def _reward_tracking_ang_vel_z(self):
         """
@@ -2010,44 +2166,108 @@ class LeggedRobot(BaseTask):
         rew_airTime *= cmd_nonzero.float()
         self.feet_air_time *= ~contact_filt
         return rew_airTime
+
+    def _reward_feet_contact_balance(self):
+        """
+        惩罚单脚长时间悬空 - 鼓励四脚接触时间平衡
+        """
+        # 统计每只脚在 contact_buf 中的接触比例
+        contact_ratio = self.contact_buf.mean(dim=1)  # (num_envs, 4)
+        # 计算四脚接触率的方差（方差越小越平衡）
+        variance = torch.var(contact_ratio, dim=1)
+        # 返回负方差作为惩罚（方差越大惩罚越大）
+        return variance
+
+    def _reward_gait_periodicity(self):
+        """
+        鼓励步态周期性 - 基于接触状态变化频率
+        """
+        if self.contact_buf.shape[1] < 2:
+            return torch.zeros(self.num_envs, device=self.device)
+        # 计算接触状态变化次数（从接触到悬空或反之）
+        contact_changes = torch.abs(self.contact_buf[:, 1:] - self.contact_buf[:, :-1])
+        change_freq = contact_changes.sum(dim=(1, 2))  # 总变化次数
+        # 期望的变化频率（取决于 buffer 长度和期望步频）
+        expected_changes = self.contact_buf.shape[1] * 0.3  # 经验值
+        # 奖励接近期望频率的步态
+        return torch.exp(-torch.abs(change_freq - expected_changes) / expected_changes)
     
+    def _reward_feet_min_contact_time(self):
+        """
+        惩罚接地时间过短（防止快速点地作弊）
+        使用 contact_buf 的上一帧作为 prev_contact（因为 post_physics_step 在 rewards 前会更新 contact_buf）
+        """
+        # 当前接触：与 contact_buf 的计算方式保持一致（使用力的 norm）
+        contact = torch.norm(self.contact_forces[:, self.feet_indices], dim=-1) > 2.0  # (num_envs, 4)
+        # 上一帧接触：优先从 contact_buf 读取（compute_observations 会在 rewards 之后更新 contact_buf）
+        if hasattr(self, "contact_buf") and self.contact_buf.shape[1] >= 1:
+            prev_contact = (self.contact_buf[:, -1, :] > 0.5)  # contact_buf 保存的是 contact_filt 的历史，-1 是上一帧
+        else:
+            # fallback: 使用 last_contacts（如果没有 contact_buf）
+            prev_contact = self.last_contacts
+        # 初始化 feet_contact_time（每次接地累计）
+        if not hasattr(self, 'feet_contact_time'):
+            self.feet_contact_time = torch.zeros(self.num_envs, self.feet_indices.shape[0], device=self.device)
+        # 增加接地时间：仅对当前接触的脚计时
+        self.feet_contact_time[contact] += self.dt
+        # 检测离地事件（上一帧接触、当前不接触）
+        lift_off = prev_contact & (~contact)
+        # 阈值与惩罚
+        min_contact_time = getattr(self.cfg.rewards, 'min_feet_contact_time', 0.1)
+        # 计算接地时间过短的惩罚（只有在 lift_off 时生效）
+        contact_too_short = torch.clamp(min_contact_time - self.feet_contact_time, min=0.0)
+        penalty = torch.sum(contact_too_short * lift_off.float(), dim=1)
+        # 重置已离地脚的接地计时（或未接触的脚）
+        self.feet_contact_time[~contact] = 0.0
+        # note: 返回的值会乘以 reward scale（cfg.rewards.scales.feet_min_contact_time）
+        return penalty
+
     def _reward_lazy_stop(self):
         """
-        惩罚：当命令非零但实际速度跟踪差时（包括线速度和角速度）
+        惩罚：当命令非零时，根据实际速度与命令的误差进行惩罚
+        使用 square：大误差时给予更强的纠正信号
         """
         lin_vel_clip = getattr(self.cfg.commands, 'lin_vel_clip', 0.1)
         ang_vel_clip = getattr(self.cfg.commands, 'ang_vel_clip', 0.1)
-        
-        # 线速度误差
+
         lin_vel_error = torch.norm(self.base_lin_vel[:, :2] - self.commands[:, :2], dim=1)
-        # 角速度误差
         ang_vel_error = torch.abs(self.base_ang_vel[:, 2] - self.commands[:, 2])
-        
-        # 线速度命令非零但跟踪差
+
         lin_cmd_nonzero = torch.norm(self.commands[:, :2], dim=1) > lin_vel_clip
-        lin_penalty = (lin_vel_error > lin_vel_clip) * lin_cmd_nonzero
-        
-        # 角速度命令非零但跟踪差
         ang_cmd_nonzero = torch.abs(self.commands[:, 2]) > ang_vel_clip
-        ang_penalty = (ang_vel_error > ang_vel_clip) * ang_cmd_nonzero
-        
-        # 综合惩罚（任一不满足都惩罚）
-        return lin_penalty.float() + ang_penalty.float()
+
+        # 使用 square: 大误差时惩罚更强，有利于快速纠正
+        lin_penalty = torch.square(lin_vel_error) * lin_cmd_nonzero.float()
+        ang_penalty = torch.square(ang_vel_error) * ang_cmd_nonzero.float()
+
+        return lin_penalty + ang_penalty
     
     def _reward_stand_still(self):
         """
-        惩罚：当命令为零时机器人仍在运动
+        惩罚：当命令为零时机器人仍在运动或未保持稳定站立
+        - 关节位置偏离默认值
+        - 四脚未全部着地
         """
         lin_vel_clip = getattr(self.cfg.commands, 'lin_vel_clip', 0.1)
         ang_vel_clip = getattr(self.cfg.commands, 'ang_vel_clip', 0.1)
-        
         # 命令接近零
         cmd_near_zero = torch.logical_and(
             torch.norm(self.commands[:, :2], dim=1) < lin_vel_clip,
             torch.abs(self.commands[:, 2]) < ang_vel_clip
         )
-        
-        return torch.sum(torch.abs(self.dof_pos - self.default_dof_pos), dim=1) * cmd_near_zero.float()
+        # 惩罚1: 关节位置偏离默认值（原有逻辑）
+        joint_penalty = torch.sum(torch.abs(self.dof_pos - self.default_dof_pos), dim=1)
+        # 惩罚2: 四脚未全部着地
+        # 检测每只脚的接触状态（与 feet_air_time 的逻辑一致）
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.0  # (num_envs, 4)
+        num_feet_in_contact = contact.sum(dim=1)  # 每个 env 有几只脚着地
+        # 当命令为零时，期望四脚全部着地（num_feet_in_contact == 4）
+        # 惩罚 = (4 - 实际着地脚数)，未着地的脚越多惩罚越大
+        feet_contact_penalty = (4.0 - num_feet_in_contact.float())
+        # 合并两项惩罚（可根据需要调整权重）
+        # 这里假设关节偏离和脚接触同等重要
+        total_penalty = (joint_penalty + feet_contact_penalty) * cmd_near_zero.float()
+        return total_penalty
     
     def _reward_base_height(self):
         # Penalize base height away from target

@@ -207,7 +207,10 @@ class OnPolicyRunner:
             learn_time = stop - start
             if self.log_dir is not None:
                 self.log(locals())
-            if it < 2500:
+            if it < 500:
+                if it % int(0.5*self.save_interval) == 0:
+                    self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(it)))
+            elif it < 2500:
                 if it % self.save_interval == 0:
                     self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(it)))
             elif it < 5000:

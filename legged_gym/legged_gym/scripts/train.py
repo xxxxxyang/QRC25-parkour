@@ -39,6 +39,7 @@ from legged_gym.utils import get_args, task_registry
 from shutil import copyfile
 import torch
 import wandb
+import inspect
 
 def train(args):
     # args.headless = True
@@ -62,6 +63,8 @@ def train(args):
     wandb.save(LEGGED_GYM_ENVS_DIR + "/base/legged_robot.py", policy="now")
 
     env, env_cfg = task_registry.make_env(name=args.task, args=args)
+    cfg_path = inspect.getfile(type(env_cfg))
+    wandb.save(cfg_path, policy="now")
     ppo_runner, train_cfg = task_registry.make_alg_runner(log_root = log_pth, env=env, name=args.task, args=args)
     ppo_runner.learn(num_learning_iterations=train_cfg.runner.max_iterations, init_at_random_ep_len=True)
 

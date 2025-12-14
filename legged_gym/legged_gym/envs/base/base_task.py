@@ -117,6 +117,8 @@ class BaseTask():
                 self.viewer, gymapi.KEY_A, "left_turn")
             self.gym.subscribe_viewer_keyboard_event(
                 self.viewer, gymapi.KEY_D, "right_turn")
+            self.gym.subscribe_viewer_keyboard_event(
+                self.viewer, gymapi.KEY_R, "reset_env")
         self.free_cam = False
         self.lookat_id = 0
         self.lookat_vec = torch.tensor([-0, 2, 1], requires_grad=False, device=self.device)
@@ -178,6 +180,12 @@ class BaseTask():
                         self.commands[self.lookat_id, 2] += 0.5
                     if evt.action == "right_turn" and evt.value > 0:
                         self.commands[self.lookat_id, 2] -= 0.5
+                    if evt.action == "reset_env" and evt.value > 0:
+                        # reset currently observed env
+                        try:
+                            self.reset_idx(torch.tensor([self.lookat_id], device=self.device, dtype=torch.long))
+                        except Exception as e:
+                            print(f"Failed to reset env {self.lookat_id}: {e}")
                 if evt.action == "free_cam" and evt.value > 0:
                     self.free_cam = not self.free_cam
                     if self.free_cam:

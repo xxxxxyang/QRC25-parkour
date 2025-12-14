@@ -126,9 +126,11 @@ class DepthNoiseManager:
         sp_prob = self.cfg.depth.outlier_prob * noise_scale
         mask = torch.rand_like(depth_image) < sp_prob
         # 椒盐值：随机最远/最近
-        sp_val = torch.where(torch.rand_like(depth_image) > 0.5,
-                             torch.tensor(self.cfg.depth.far_clip, device=self.device),
-                             torch.tensor(self.cfg.depth.near_clip, device=self.device))
+        sp_val = torch.where(
+            torch.rand_like(depth_image) > 0.5,
+            torch.tensor(float(self.cfg.depth.far_clip), dtype=depth_image.dtype, device=self.device),
+            torch.tensor(float(self.cfg.depth.near_clip), dtype=depth_image.dtype, device=self.device)
+        )
         depth_noisy = torch.where(mask, sp_val, depth_noisy)
         return depth_noisy
 

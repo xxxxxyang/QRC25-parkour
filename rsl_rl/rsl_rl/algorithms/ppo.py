@@ -131,21 +131,22 @@ class PPO:
             self.depth_actor_optimizer = optim.Adam([*self.depth_actor.parameters(), *self.depth_encoder.parameters()], lr=depth_encoder_paras["learning_rate"])
 
         # GradNorm
-        self.gradnorm_alpha = 0.5
-        self.task_weights = torch.nn.Parameter(torch.tensor([1.0, 1.0], device=self.device)) # initialize task weights for 2 tasks
-        self.task_weight_optimizer = torch.optim.Adam([self.task_weights], lr=1e-3)
-        self.initial_losses = None
-        self.gradnorm_shared_params = (
-                    list(self.depth_encoder.g_a.parameters()) +
-                    list(self.depth_encoder.g_b.parameters())
-                )
-        self.ema_decay = 0.99
-        self.loss_ema = {
-            "recon": None,
-            "action": None
-        }
-        # self.gradnorm_shared_params = [next(self.depth_encoder.parameters())]
-        # self.gradnorm_shared_params = list(self.depth_encoder.parameters())
+        if self.if_depth:
+            self.gradnorm_alpha = 0.5
+            self.task_weights = torch.nn.Parameter(torch.tensor([1.0, 1.0], device=self.device)) # initialize task weights for 2 tasks
+            self.task_weight_optimizer = torch.optim.Adam([self.task_weights], lr=1e-3)
+            self.initial_losses = None
+            self.gradnorm_shared_params = (
+                        list(self.depth_encoder.g_a.parameters()) +
+                        list(self.depth_encoder.g_b.parameters())
+                    )
+            self.ema_decay = 0.99
+            self.loss_ema = {
+                "recon": None,
+                "action": None
+            }
+            # self.gradnorm_shared_params = [next(self.depth_encoder.parameters())]
+            # self.gradnorm_shared_params = list(self.depth_encoder.parameters())
 
     def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape):
         self.storage = RolloutStorage(num_envs, num_transitions_per_env, actor_obs_shape,  critic_obs_shape, action_shape, self.device)

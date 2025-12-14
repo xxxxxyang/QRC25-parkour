@@ -103,7 +103,7 @@ def play(args):
                                         "demo": 0.}
     env_cfg.terrain.terrain_proportions = list(env_cfg.terrain.terrain_dict.values())
     env_cfg.terrain.curriculum = True
-    env_cfg.terrain.max_difficulty = True
+    env_cfg.commands.curriculum = True
     
     env_cfg.depth.angle = [0, 1]
     env_cfg.noise.add_noise = True
@@ -190,7 +190,8 @@ def play(args):
                 actions = ppo_runner.alg.depth_actor(obs.detach(), hist_encoding=True, scandots_latent=depth_latent)
             else:
                 actions = policy(obs.detach(), hist_encoding=True, scandots_latent=depth_latent)
-            
+
+        # actions = torch.zeros(env.num_envs, 12, device=env.device, requires_grad=False)
         obs, _, rews, dones, infos = env.step(actions.detach())
         if args.web:
             web_viewer.render(fetch_results=True,
