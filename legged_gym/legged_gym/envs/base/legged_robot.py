@@ -2066,24 +2066,24 @@ class LeggedRobot(BaseTask):
     #     rew[stop_mask] *= 2.0
     #     return rew
 
-    def _reward_tracking_lin_vel_forward(self):
-        """追踪前向速度（vx > 0）"""
-        forward_mask = self.commands[:, 0] > 0
-        lin_vel_error = torch.sum(torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1)
-        rew = torch.exp(-lin_vel_error / self.cfg.rewards.tracking_sigma)
-        return rew * forward_mask.float()
-
-    def _reward_tracking_lin_vel_backward(self):
-        """追踪后向速度（vx < 0）"""
-        backward_mask = self.commands[:, 0] < 0
-        lin_vel_error = torch.sum(torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1)
-        rew = torch.exp(-lin_vel_error / self.cfg.rewards.tracking_sigma)
-        return rew * backward_mask.float()
-
-    # def _reward_tracking_lin_vel(self):
-    #     # Tracking of linear velocity commands (xy axes)
+    # def _reward_tracking_lin_vel_forward(self):
+    #     """追踪前向速度（vx > 0）"""
+    #     forward_mask = self.commands[:, 0] > 0
     #     lin_vel_error = torch.sum(torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1)
-    #     return torch.exp(-lin_vel_error/self.cfg.rewards.tracking_sigma)
+    #     rew = torch.exp(-lin_vel_error / self.cfg.rewards.tracking_sigma)
+    #     return rew * forward_mask.float()
+
+    # def _reward_tracking_lin_vel_backward(self):
+    #     """追踪后向速度（vx < 0）"""
+    #     backward_mask = self.commands[:, 0] < 0
+    #     lin_vel_error = torch.sum(torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1)
+    #     rew = torch.exp(-lin_vel_error / self.cfg.rewards.tracking_sigma)
+    #     return rew * backward_mask.float()
+
+    def _reward_tracking_lin_vel(self):
+        # Tracking of linear velocity commands (xy axes)
+        lin_vel_error = torch.sum(torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1)
+        return torch.exp(-lin_vel_error/self.cfg.rewards.tracking_sigma)
     
     def _reward_tracking_ang_vel_z(self):
         """
@@ -2147,25 +2147,187 @@ class LeggedRobot(BaseTask):
         # Terminal reward / penalty
         return self.reset_buf * ~self.time_out_buf
     
-    def _reward_feet_air_time(self):
-        # Reward long steps
-        # Need to filter the contacts because the contact reporting of PhysX is unreliable on meshes
-        last_contact = self.last_contact_forces[:, self.feet_indices, 2] > 1.
-        contact = self.contact_forces[:, self.feet_indices, 2] > 1.
-        contact_filt = torch.logical_or(contact, last_contact) 
-        first_contact = (self.feet_air_time > 0.) * contact_filt
+
+    # def _reward_feet_phase(self):
+    #     """
+    #     纯相位比例奖励：
+    #     - 不直接奖励 air_time
+    #     - 只约束 stance / (stance + swing) 比例
+    #     - 在落地事件结算
+    #     """
+    #     num_feet = self.feet_indices.shape[0]
+    #     # ========= 接触判定 =========
+    #     contact_z_curr = self.contact_forces[:, self.feet_indices, 2] > 1.0
+    #     contact_z_last = self.last_contact_forces[:, self.feet_indices, 2] > 1.0
+    #     contact_filt = torch.logical_or(contact_z_curr, contact_z_last)
+    #     contact_support = torch.norm(
+    #         self.contact_forces[:, self.feet_indices], dim=-1
+    #     ) > 2.0
+    #     # ========= 初始化 =========
+    #     if not hasattr(self, "feet_air_time"):
+    #         self.feet_air_time = torch.zeros(self.num_envs, num_feet, device=self.device)
+    #     if not hasattr(self, "feet_stance_time"):
+    #         self.feet_stance_time = torch.zeros(self.num_envs, num_feet, device=self.device)
+    #     if not hasattr(self, "last_stance_duration"):
+    #         self.last_stance_duration = torch.zeros(self.num_envs, num_feet, device=self.device)
+    #     # ========= 事件 =========
+    #     first_contact = (self.feet_air_time > 0.0) & contact_filt
+    #     if not hasattr(self, "_prev_contact_support"):
+    #         self._prev_contact_support = contact_support.clone()
+    #     lift_off = self._prev_contact_support & (~contact_support)
+    #     # ========= 计时 =========
+    #     self.feet_air_time += self.dt
+    #     self.feet_stance_time[contact_support] += self.dt
+    #     self.last_stance_duration[lift_off] = self.feet_stance_time[lift_off]
+    #     self.feet_stance_time[~contact_support] = 0.0
+    #     # ========= 相位比例奖励 =========
+    #     swing = self.feet_air_time
+    #     stance = self.last_stance_duration
+    #     cycle = stance + swing + 1e-6
+    #     stance_ratio = stance / cycle
+    #     desired_ratio = getattr(self.cfg.rewards, "desired_stance_ratio", 0.5)
+    #     ratio_error = torch.abs(stance_ratio - desired_ratio)
+    #     reward = torch.sum(ratio_error * first_contact.float(), dim=1)
+    #     # ========= 命令门控 =========
+    #     lin_vel_clip = getattr(self.cfg.commands, "lin_vel_clip", 0.1)
+    #     ang_vel_clip = getattr(self.cfg.commands, "ang_vel_clip", 0.1)
+    #     cmd_nonzero = torch.logical_or(
+    #         torch.norm(self.commands[:, :2], dim=1) > lin_vel_clip,
+    #         torch.abs(self.commands[:, 2]) > ang_vel_clip
+    #     )
+    #     reward *= cmd_nonzero.float()
+    #     # ========= reset =========
+    #     self.feet_air_time *= (~contact_filt).float()
+    #     self._prev_contact_support = contact_support.clone()
+    #     return reward
+    
+    def _reward_feet_phase(self):
+        """
+        相位比例 + 周期软下界奖励
+        - desired_ratio 根据命令速度动态调整
+        """
+        num_feet = self.feet_indices.shape[0]
+        # ========= 接触判定 =========
+        contact_z_curr = self.contact_forces[:, self.feet_indices, 2] > 1.0
+        contact_z_last = self.last_contact_forces[:, self.feet_indices, 2] > 1.0
+        contact_filt = torch.logical_or(contact_z_curr, contact_z_last)
+        contact_support = (
+            torch.norm(self.contact_forces[:, self.feet_indices], dim=-1) > 2.0
+        )
+        # ========= 初始化 =========
+        if not hasattr(self, "feet_air_time"):
+            self.feet_air_time = torch.zeros(self.num_envs, num_feet, device=self.device)
+        if not hasattr(self, "feet_stance_time"):
+            self.feet_stance_time = torch.zeros(self.num_envs, num_feet, device=self.device)
+        if not hasattr(self, "last_stance_duration"):
+            self.last_stance_duration = torch.zeros(self.num_envs, num_feet, device=self.device)
+        # ========= 事件 =========
+        first_contact = (self.feet_air_time > 0.0) & contact_filt
+        if not hasattr(self, "_prev_contact_support"):
+            self._prev_contact_support = contact_support.clone()
+        lift_off = self._prev_contact_support & (~contact_support)
+        # ========= 计时 =========
         self.feet_air_time += self.dt
-        rew_airTime = torch.sum((self.feet_air_time - 0.5) * first_contact, dim=1) # reward only on first contact with the ground
-        # 修改：线速度或角速度命令非零时都给予步态奖励
-        lin_vel_clip = getattr(self.cfg.commands, 'lin_vel_clip', 0.1)
-        ang_vel_clip = getattr(self.cfg.commands, 'ang_vel_clip', 0.1)
+        self.feet_stance_time[contact_support] += self.dt
+        self.last_stance_duration[lift_off] = self.feet_stance_time[lift_off]
+        self.feet_stance_time[~contact_support] = 0.0
+        # ========= 动态 desired_ratio（关键修改）=========
+        # 计算命令速度的幅值（线速度 + 角速度）
+        lin_vel_cmd = torch.norm(self.commands[:, :2], dim=1)  # (num_envs,)
+        ang_vel_cmd = torch.abs(self.commands[:, 2])  # (num_envs,)
+        # 综合速度指标（可以调整权重）
+        cmd_speed = lin_vel_cmd + 0.5 * ang_vel_cmd  # (num_envs,)
+        # 根据速度映射 desired_ratio
+        # 配置参数
+        ratio_at_zero_speed = getattr(self.cfg.rewards, "stance_ratio_at_low_speed", 0.7)  # 低速时的目标比例
+        ratio_at_max_speed = getattr(self.cfg.rewards, "stance_ratio_at_high_speed", 0.4)   # 最大速度时的目标比例
+        max_speed_for_ratio = getattr(self.cfg.commands.max_ranges, "lin_vel_x", [-1.0, 1.5])[1]  # 用于映射的最大速度
+        min_speed_for_ratio = getattr(self.cfg.commands, "lin_vel_clip", 0.1)
+        # 线性插值：speed=0 → ratio_at_zero_speed, speed=max_speed → ratio_at_max_speed
+        # ratio = ratio_at_zero - (ratio_at_zero - ratio_at_max) * min(speed/max_speed, 1.0)
+        cmd_speed_clipped = torch.clamp(cmd_speed, min_speed_for_ratio, max_speed_for_ratio)
+        speed_normalized = (cmd_speed_clipped - min_speed_for_ratio) / (max_speed_for_ratio - min_speed_for_ratio)
+        # sigmoid: 0.5 + 0.5 * tanh(x) 范围 [0, 1]
+        speed_factor = torch.sigmoid(2.0 * (speed_normalized - 0.5))  # 在 0.5 处中心化
+        desired_ratio = ratio_at_zero_speed - (ratio_at_zero_speed - ratio_at_max_speed) * speed_factor
+        # desired_ratio shape: (num_envs,)
+        # ========= 相位比例 =========
+        swing = self.feet_air_time  # (num_envs, num_feet)
+        stance = self.last_stance_duration  # (num_envs, num_feet)
+        cycle = stance + swing + 1e-6
+        # 扩展 desired_ratio 到每只脚
+        desired_ratio_per_foot = desired_ratio[:, None].expand(-1, num_feet)  # (num_envs, num_feet)
+        ratio_error = torch.abs(stance / cycle - desired_ratio_per_foot)
+        # ========= 周期软下界 =========
+        min_cycle_time = getattr(self.cfg.rewards, "min_cycle_time", 0.5)
+        cycle_penalty = torch.clamp(min_cycle_time - cycle, min=0.0)
+        # ========= 合成奖励（注意：这是惩罚项） =========
+        reward = torch.sum(
+            (ratio_error + cycle_penalty) * first_contact.float(),
+            dim=1
+        )
+        # ========= 命令门控 =========
+        lin_vel_clip = getattr(self.cfg.commands, "lin_vel_clip", 0.1)
+        ang_vel_clip = getattr(self.cfg.commands, "ang_vel_clip", 0.1)
         cmd_nonzero = torch.logical_or(
             torch.norm(self.commands[:, :2], dim=1) > lin_vel_clip,
             torch.abs(self.commands[:, 2]) > ang_vel_clip
         )
-        rew_airTime *= cmd_nonzero.float()
-        self.feet_air_time *= ~contact_filt
-        return rew_airTime
+        reward *= cmd_nonzero.float()
+        # ========= reset =========
+        self.feet_air_time *= (~contact_filt).float()
+        self._prev_contact_support = contact_support.clone()
+        return reward
+
+    # def _reward_feet_air_time(self):
+    #     # Reward long steps
+    #     # Need to filter the contacts because the contact reporting of PhysX is unreliable on meshes
+    #     last_contact = self.last_contact_forces[:, self.feet_indices, 2] > 1.
+    #     contact = self.contact_forces[:, self.feet_indices, 2] > 1.
+    #     contact_filt = torch.logical_or(contact, last_contact) 
+    #     first_contact = (self.feet_air_time > 0.) * contact_filt
+    #     self.feet_air_time += self.dt
+    #     rew_airTime = torch.sum((self.feet_air_time - 0.5) * first_contact, dim=1) # reward only on first contact with the ground
+    #     # 修改：线速度或角速度命令非零时都给予步态奖励
+    #     lin_vel_clip = getattr(self.cfg.commands, 'lin_vel_clip', 0.1)
+    #     ang_vel_clip = getattr(self.cfg.commands, 'ang_vel_clip', 0.1)
+    #     cmd_nonzero = torch.logical_or(
+    #         torch.norm(self.commands[:, :2], dim=1) > lin_vel_clip,
+    #         torch.abs(self.commands[:, 2]) > ang_vel_clip
+    #     )
+    #     rew_airTime *= cmd_nonzero.float()
+    #     self.feet_air_time *= ~contact_filt
+    #     return rew_airTime
+
+    # def _reward_feet_min_contact_time(self):
+    #     """
+    #     惩罚接地时间过短（防止快速点地作弊）
+    #     使用 contact_buf 的上一帧作为 prev_contact（因为 post_physics_step 在 rewards 前会更新 contact_buf）
+    #     """
+    #     # 当前接触：与 contact_buf 的计算方式保持一致（使用力的 norm）
+    #     contact = torch.norm(self.contact_forces[:, self.feet_indices], dim=-1) > 2.0  # (num_envs, 4)
+    #     # 上一帧接触：优先从 contact_buf 读取（compute_observations 会在 rewards 之后更新 contact_buf）
+    #     if hasattr(self, "contact_buf") and self.contact_buf.shape[1] >= 1:
+    #         prev_contact = (self.contact_buf[:, -1, :] > 0.5)  # contact_buf 保存的是 contact_filt 的历史，-1 是上一帧
+    #     else:
+    #         # fallback: 使用 last_contacts（如果没有 contact_buf）
+    #         prev_contact = self.last_contacts
+    #     # 初始化 feet_contact_time（每次接地累计）
+    #     if not hasattr(self, 'feet_contact_time'):
+    #         self.feet_contact_time = torch.zeros(self.num_envs, self.feet_indices.shape[0], device=self.device)
+    #     # 增加接地时间：仅对当前接触的脚计时
+    #     self.feet_contact_time[contact] += self.dt
+    #     # 检测离地事件（上一帧接触、当前不接触）
+    #     lift_off = prev_contact & (~contact)
+    #     # 阈值与惩罚
+    #     min_contact_time = getattr(self.cfg.rewards, 'min_feet_contact_time', 0.1)
+    #     # 计算接地时间过短的惩罚（只有在 lift_off 时生效）
+    #     contact_too_short = torch.clamp(min_contact_time - self.feet_contact_time, min=0.0)
+    #     penalty = torch.sum(contact_too_short * lift_off.float(), dim=1)
+    #     # 重置已离地脚的接地计时（或未接触的脚）
+    #     self.feet_contact_time[~contact] = 0.0
+    #     # note: 返回的值会乘以 reward scale（cfg.rewards.scales.feet_min_contact_time）
+    #     return penalty
 
     def _reward_feet_contact_balance(self):
         """
@@ -2178,49 +2340,19 @@ class LeggedRobot(BaseTask):
         # 返回负方差作为惩罚（方差越大惩罚越大）
         return variance
 
-    def _reward_gait_periodicity(self):
-        """
-        鼓励步态周期性 - 基于接触状态变化频率
-        """
-        if self.contact_buf.shape[1] < 2:
-            return torch.zeros(self.num_envs, device=self.device)
-        # 计算接触状态变化次数（从接触到悬空或反之）
-        contact_changes = torch.abs(self.contact_buf[:, 1:] - self.contact_buf[:, :-1])
-        change_freq = contact_changes.sum(dim=(1, 2))  # 总变化次数
-        # 期望的变化频率（取决于 buffer 长度和期望步频）
-        expected_changes = self.contact_buf.shape[1] * 0.3  # 经验值
-        # 奖励接近期望频率的步态
-        return torch.exp(-torch.abs(change_freq - expected_changes) / expected_changes)
-    
-    def _reward_feet_min_contact_time(self):
-        """
-        惩罚接地时间过短（防止快速点地作弊）
-        使用 contact_buf 的上一帧作为 prev_contact（因为 post_physics_step 在 rewards 前会更新 contact_buf）
-        """
-        # 当前接触：与 contact_buf 的计算方式保持一致（使用力的 norm）
-        contact = torch.norm(self.contact_forces[:, self.feet_indices], dim=-1) > 2.0  # (num_envs, 4)
-        # 上一帧接触：优先从 contact_buf 读取（compute_observations 会在 rewards 之后更新 contact_buf）
-        if hasattr(self, "contact_buf") and self.contact_buf.shape[1] >= 1:
-            prev_contact = (self.contact_buf[:, -1, :] > 0.5)  # contact_buf 保存的是 contact_filt 的历史，-1 是上一帧
-        else:
-            # fallback: 使用 last_contacts（如果没有 contact_buf）
-            prev_contact = self.last_contacts
-        # 初始化 feet_contact_time（每次接地累计）
-        if not hasattr(self, 'feet_contact_time'):
-            self.feet_contact_time = torch.zeros(self.num_envs, self.feet_indices.shape[0], device=self.device)
-        # 增加接地时间：仅对当前接触的脚计时
-        self.feet_contact_time[contact] += self.dt
-        # 检测离地事件（上一帧接触、当前不接触）
-        lift_off = prev_contact & (~contact)
-        # 阈值与惩罚
-        min_contact_time = getattr(self.cfg.rewards, 'min_feet_contact_time', 0.1)
-        # 计算接地时间过短的惩罚（只有在 lift_off 时生效）
-        contact_too_short = torch.clamp(min_contact_time - self.feet_contact_time, min=0.0)
-        penalty = torch.sum(contact_too_short * lift_off.float(), dim=1)
-        # 重置已离地脚的接地计时（或未接触的脚）
-        self.feet_contact_time[~contact] = 0.0
-        # note: 返回的值会乘以 reward scale（cfg.rewards.scales.feet_min_contact_time）
-        return penalty
+    # def _reward_gait_periodicity(self):
+    #     """
+    #     鼓励步态周期性 - 基于接触状态变化频率
+    #     """
+    #     if self.contact_buf.shape[1] < 2:
+    #         return torch.zeros(self.num_envs, device=self.device)
+    #     # 计算接触状态变化次数（从接触到悬空或反之）
+    #     contact_changes = torch.abs(self.contact_buf[:, 1:] - self.contact_buf[:, :-1])
+    #     change_freq = contact_changes.sum(dim=(1, 2))  # 总变化次数
+    #     # 期望的变化频率（取决于 buffer 长度和期望步频）
+    #     expected_changes = self.contact_buf.shape[1] * 0.3  # 经验值
+    #     # 奖励接近期望频率的步态
+    #     return torch.exp(-torch.abs(change_freq - expected_changes) / expected_changes)
 
     def _reward_lazy_stop(self):
         """
@@ -2246,7 +2378,7 @@ class LeggedRobot(BaseTask):
         """
         惩罚：当命令为零时机器人仍在运动或未保持稳定站立
         - 关节位置偏离默认值
-        - 四脚未全部着地
+        - 四脚未全部支撑
         """
         lin_vel_clip = getattr(self.cfg.commands, 'lin_vel_clip', 0.1)
         ang_vel_clip = getattr(self.cfg.commands, 'ang_vel_clip', 0.1)
@@ -2255,18 +2387,18 @@ class LeggedRobot(BaseTask):
             torch.norm(self.commands[:, :2], dim=1) < lin_vel_clip,
             torch.abs(self.commands[:, 2]) < ang_vel_clip
         )
-        # 惩罚1: 关节位置偏离默认值（原有逻辑）
+        # 惩罚1: 关节位置偏离默认值
         joint_penalty = torch.sum(torch.abs(self.dof_pos - self.default_dof_pos), dim=1)
-        # 惩罚2: 四脚未全部着地
-        # 检测每只脚的接触状态（与 feet_air_time 的逻辑一致）
-        contact = self.contact_forces[:, self.feet_indices, 2] > 1.0  # (num_envs, 4)
-        num_feet_in_contact = contact.sum(dim=1)  # 每个 env 有几只脚着地
-        # 当命令为零时，期望四脚全部着地（num_feet_in_contact == 4）
-        # 惩罚 = (4 - 实际着地脚数)，未着地的脚越多惩罚越大
-        feet_contact_penalty = (4.0 - num_feet_in_contact.float())
+        # 惩罚2: 四脚未全部支撑
+        # 检测每只脚的支撑状态（基于力的范数）
+        contact_support = torch.norm(self.contact_forces[:, self.feet_indices], dim=-1) > 2.0  # (num_envs, 4)
+        num_feet_in_support = contact_support.sum(dim=1)  # 每个 env 有几只脚支撑
+        # 当命令为零时，期望四脚全部支撑（num_feet_in_support == 4）
+        # 惩罚 = (4 - 实际支撑脚数)，未支撑的脚越多惩罚越大
+        feet_support_penalty = (4.0 - num_feet_in_support.float())
         # 合并两项惩罚（可根据需要调整权重）
-        # 这里假设关节偏离和脚接触同等重要
-        total_penalty = (joint_penalty + feet_contact_penalty) * cmd_near_zero.float()
+        # 这里假设关节偏离和脚支撑同等重要
+        total_penalty = (joint_penalty + feet_support_penalty) * cmd_near_zero.float()
         return total_penalty
     
     def _reward_base_height(self):

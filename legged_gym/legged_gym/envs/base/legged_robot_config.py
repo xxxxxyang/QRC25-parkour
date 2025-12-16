@@ -314,9 +314,9 @@ class LeggedRobotCfg(BaseConfig):
             # tracking rewards
             # tracking_goal_vel = 1.5
             # tracking_yaw = 0.5
-            # tracking_lin_vel = 1.5
-            tracking_lin_vel_forward = 3.0   # 前向权重更高
-            tracking_lin_vel_backward = 1.5  # 后向权重较低
+            tracking_lin_vel = 1.5
+            # tracking_lin_vel_forward = 3.0   # 前向权重更高
+            # tracking_lin_vel_backward = 1.5  # 后向权重较低
             tracking_ang_vel_z = 0.5
             # regularization rewards
             lin_vel_z = -1.0
@@ -331,9 +331,7 @@ class LeggedRobotCfg(BaseConfig):
             dof_error = -0.04
             feet_stumble = -1
             feet_edge = -1
-            feet_air_time = 1.5
-            feet_min_contact_time = -1.0
-            gait_periodicity = 0.5
+            feet_phase = -1.0
             feet_contact_balance = -0.5
             lazy_stop = -0.5
             stand_still = -0.5
@@ -346,6 +344,10 @@ class LeggedRobotCfg(BaseConfig):
         soft_torque_limit = 0.4
         base_height_target = 1.
         max_contact_force = 40. # forces above this value are penalized
+
+        min_cycle_time = 0.5 # minimum time between gait cycles [s]
+        stance_ratio_at_low_speed = 0.7
+        stance_ratio_at_high_speed = 0.4
 
 
 

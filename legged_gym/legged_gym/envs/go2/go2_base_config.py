@@ -54,6 +54,7 @@ class Go2BaseCfg( LeggedRobotCfg ):
 
     class env( LeggedRobotCfg.env ):
         num_envs = 4096
+        # num_envs = 6144
 
     class control( LeggedRobotCfg.control ):
         # PD Drive parameters:
@@ -76,22 +77,19 @@ class Go2BaseCfg( LeggedRobotCfg ):
         base_height_target = 0.25
         class scales( LeggedRobotCfg.rewards.scales ):
             # tracking_goal_vel = 0
-            # tracking_lin_vel = 1.5
-            tracking_lin_vel_forward = 1.5   # 前向权重更高
-            tracking_lin_vel_backward = 0.5  # 后向权重较低
+            tracking_lin_vel = 2.0
             tracking_ang_vel_z = 1.0
             # regularization rewards
             lin_vel_z = -1.5
             stand_still = -0.2
-            orientation = -1.5
-            feet_air_time = 3.0 # 1.0(滞空时间太短) 5.0(base-11)训不出来
-            feet_min_contact_time = -1.0
-            gait_periodicity = 0.5
+            orientation = -1.0
+            feet_phase = -1.0
             feet_contact_balance = -0.5
-            lazy_stop = -3.0
+            lazy_stop = -1.0
             dof_error = -0.2
             base_height = -0.1
-            torques = -0.00002
+            torques = -0.000001
+            delta_torques = -2.0e-7
 
     class depth( LeggedRobotCfg.depth ):
         # position = [0.32, 0.0, 0.035]  # front camera
@@ -116,14 +114,14 @@ class Go2BaseCfg( LeggedRobotCfg ):
         downsampled_scale = 0.06
         height = [0.02, 0.12]
         terrain_dict = {"smooth slope": 0., 
-                        "rough slope up": 0.25,
-                        "rough slope down": 0.25,
+                        "rough slope up": 0.2,
+                        "rough slope down": 0.2,
                         "rough stairs up": 0., 
                         "rough stairs down": 0., 
-                        "discrete": 0.25, 
+                        "discrete": 0.4, 
                         "stepping stones": 0.,
                         "gaps": 0., 
-                        "smooth flat": 0.25,
+                        "smooth flat": 0.2,
                         "pit": 0.,
                         "wall": 0.,
                         "platform": 0.,
