@@ -75,21 +75,27 @@ class Go2BaseCfg( LeggedRobotCfg ):
     class rewards( LeggedRobotCfg.rewards ):
         soft_dof_pos_limit = 0.9
         base_height_target = 0.25
+        min_cycle_time = 0.7
         class scales( LeggedRobotCfg.rewards.scales ):
             # tracking_goal_vel = 0
-            tracking_lin_vel = 2.0
+            tracking_lin_vel = 0.0
+            tracking_lin_vel_forward = 2.5   # 前向权重更高
+            tracking_lin_vel_backward = 1.5  # 后向权重较低
             tracking_ang_vel_z = 1.0
             # regularization rewards
             lin_vel_z = -1.5
             stand_still = -0.2
-            orientation = -1.0
-            feet_phase = -1.0
+            orientation = -0.0
+            roll_orientation = -0.5
+            pitch_orientation = -0.
+            feet_phase = -1.5
             feet_contact_balance = -0.5
             lazy_stop = -1.0
             dof_error = -0.2
             base_height = -0.1
-            torques = -0.000001
+            torques = -1.0e-6
             delta_torques = -2.0e-7
+            feet_contact_balance = -1.0
 
     class depth( LeggedRobotCfg.depth ):
         # position = [0.32, 0.0, 0.035]  # front camera
@@ -143,7 +149,7 @@ class Go2BaseCfg( LeggedRobotCfg ):
         ang_vel_clip = 0.2+1e-7 # [rad/s]
         min_ratio = 0.5
         initial_dead_zone = {
-            "lin_vel_x": 0.5,
+            "lin_vel_x": 0.3,
             "lin_vel_y": 0.0,
             "ang_vel_z": 0.0
         }

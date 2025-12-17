@@ -65,6 +65,7 @@ class OnPolicyRunner:
         self.depth_encoder_cfg = train_cfg["depth_encoder"]
         self.device = device
         self.env = env
+        self.num_hist = self.env.cfg.env.history_len
 
         print("Using MLP and Priviliged Env encoder ActorCritic structure")
         actor_critic: ActorCriticRMA = ActorCriticRMA(self.env.cfg.env.n_proprio,
@@ -72,7 +73,7 @@ class OnPolicyRunner:
                                                       self.env.num_obs,
                                                       self.env.cfg.env.n_priv_latent,
                                                       self.env.cfg.env.n_priv,
-                                                      self.env.cfg.env.history_len,
+                                                      self.num_hist,
                                                       self.env.num_actions,
                                                       **self.policy_cfg).to(self.device)
         estimator = Estimator(input_dim=env.cfg.env.n_proprio, output_dim=env.cfg.env.n_priv, hidden_dims=self.estimator_cfg["hidden_dims"]).to(self.device)
@@ -149,10 +150,17 @@ class OnPolicyRunner:
         rew_explr_buffer = deque(maxlen=100)
         rew_entropy_buffer = deque(maxlen=100)
         lenbuffer = deque(maxlen=100)
+        # 新增：前向和后向命令的统计缓冲区
+        rewbuffer_forward = deque(maxlen=100)
+        lenbuffer_forward = deque(maxlen=100)
+        rewbuffer_backward = deque(maxlen=100)
+        lenbuffer_backward = deque(maxlen=100)
         cur_reward_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
         cur_reward_explr_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
         cur_reward_entropy_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
         cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
+        # 新增：记录每个环境的主要命令方向（基于累积的 vx 命令）
+        cur_cmd_x_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
 
         tot_iter = self.current_learning_iteration + num_learning_iterations
         self.start_learning_iteration = copy(self.current_learning_iteration)
@@ -179,13 +187,30 @@ class OnPolicyRunner:
                         cur_reward_entropy_sum += 0
                         cur_episode_length += 1
                         
+                        # 新增：累积命令方向
+                        cur_cmd_x_sum += self.env.commands[:, 0]
+
                         new_ids = (dones > 0).nonzero(as_tuple=False)
                         
                         rewbuffer.extend(cur_reward_sum[new_ids][:, 0].cpu().numpy().tolist())
                         rew_explr_buffer.extend(cur_reward_explr_sum[new_ids][:, 0].cpu().numpy().tolist())
                         rew_entropy_buffer.extend(cur_reward_entropy_sum[new_ids][:, 0].cpu().numpy().tolist())
                         lenbuffer.extend(cur_episode_length[new_ids][:, 0].cpu().numpy().tolist())
-                        
+
+                        # 新增：根据累积命令方向分类统计
+                        if len(new_ids) > 0:
+                            for idx in new_ids[:, 0]:
+                                rew = cur_reward_sum[idx].item()
+                                length = cur_episode_length[idx].item()
+                                cmd_x_avg = cur_cmd_x_sum[idx].item() / max(length, 1)
+                                
+                                if cmd_x_avg > 0.05:  # 前向命令为主
+                                    rewbuffer_forward.append(rew)
+                                    lenbuffer_forward.append(length)
+                                elif cmd_x_avg < -0.05:  # 后向命令为主
+                                    rewbuffer_backward.append(rew)
+                                    lenbuffer_backward.append(length)
+
                         cur_reward_sum[new_ids] = 0
                         cur_reward_explr_sum[new_ids] = 0
                         cur_reward_entropy_sum[new_ids] = 0
@@ -198,7 +223,13 @@ class OnPolicyRunner:
                 start = stop
                 self.alg.compute_returns(critic_obs)
             
-            mean_value_loss, mean_surrogate_loss, mean_estimator_loss, mean_disc_loss, mean_disc_acc, mean_priv_reg_loss, priv_reg_coef = self.alg.update()
+            (   mean_value_loss,
+                mean_surrogate_loss,
+                mean_estimator_loss,
+                mean_disc_loss,
+                mean_disc_acc,
+                mean_priv_reg_loss,
+                priv_reg_coef, ) = self.alg.update()
             if hist_encoding:
                 print("Updating dagger...")
                 mean_hist_latent_loss = self.alg.update_dagger()
@@ -223,6 +254,117 @@ class OnPolicyRunner:
         
         # self.current_learning_iteration += num_learning_iterations
         self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(self.current_learning_iteration)))
+
+    def log(self, locs, width=80, pad=35):
+        self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
+        self.tot_time += locs['collection_time'] + locs['learn_time']
+        iteration_time = locs['collection_time'] + locs['learn_time']
+
+        ep_string = f''
+        wandb_dict = {}
+        if locs['ep_infos']:
+            for key in locs['ep_infos'][0]:
+                infotensor = torch.tensor([], device=self.device)
+                for ep_info in locs['ep_infos']:
+                    # handle scalar and zero dimensional tensor infos
+                    if not isinstance(ep_info[key], torch.Tensor):
+                        ep_info[key] = torch.Tensor([ep_info[key]])
+                    if len(ep_info[key].shape) == 0:
+                        ep_info[key] = ep_info[key].unsqueeze(0)
+                    infotensor = torch.cat((infotensor, ep_info[key].to(self.device)))
+                value = torch.mean(infotensor)
+                wandb_dict['Episode_rew/' + key] = value
+                ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
+        mean_std = self.alg.actor_critic.std.mean()
+        fps = int(self.num_steps_per_env * self.env.num_envs / (locs['collection_time'] + locs['learn_time']))
+
+        wandb_dict['Loss/value_function'] = ['mean_value_loss']
+        wandb_dict['Loss/surrogate'] = locs['mean_surrogate_loss']
+        wandb_dict['Loss/estimator'] = locs['mean_estimator_loss']
+        wandb_dict['Loss/hist_latent_loss'] = locs['mean_hist_latent_loss']
+        wandb_dict['Loss/priv_reg_loss'] = locs['mean_priv_reg_loss']
+        wandb_dict['Loss/priv_ref_lambda'] = locs['priv_reg_coef']
+        wandb_dict['Loss/entropy_coef'] = locs['entropy_coef']
+        wandb_dict['Loss/learning_rate'] = self.alg.learning_rate
+        wandb_dict['Loss/discriminator'] = locs['mean_disc_loss']
+        wandb_dict['Loss/discriminator_accuracy'] = locs['mean_disc_acc']
+
+        wandb_dict['Policy/mean_noise_std'] = mean_std.item()
+        wandb_dict['Perf/total_fps'] = fps
+        wandb_dict['Perf/collection time'] = locs['collection_time']
+        wandb_dict['Perf/learning_time'] = locs['learn_time']
+        if len(locs['rewbuffer']) > 0:
+            try:
+                self.env.set_curriculum_metric(statistics.mean(locs['rewbuffer']))
+            except Exception:
+                pass
+            wandb_dict['Train/mean_reward'] = statistics.mean(locs['rewbuffer'])
+            # wandb_dict['Train/mean_reward_explr'] = statistics.mean(locs['rew_explr_buffer'])
+            # wandb_dict['Train/mean_reward_task'] = wandb_dict['Train/mean_reward'] - wandb_dict['Train/mean_reward_explr']
+            # wandb_dict['Train/mean_reward_entropy'] = statistics.mean(locs['rew_entropy_buffer'])
+            wandb_dict['Train/mean_episode_length'] = statistics.mean(locs['lenbuffer'])
+            # 新增：前向和后向命令的统计
+            if len(locs['rewbuffer_forward']) > 0:
+                wandb_dict['Train/forward_mean_reward'] = statistics.mean(locs['rewbuffer_forward'])
+                wandb_dict['Train/forward_mean_episode_length'] = statistics.mean(locs['lenbuffer_forward'])
+            if len(locs['rewbuffer_backward']) > 0:
+                wandb_dict['Train/backward_mean_reward'] = statistics.mean(locs['rewbuffer_backward'])
+                wandb_dict['Train/backward_mean_episode_length'] = statistics.mean(locs['lenbuffer_backward'])
+            # wandb_dict['Train/mean_reward/time', statistics.mean(locs['rewbuffer']), self.tot_time)
+            # wandb_dict['Train/mean_episode_length/time', statistics.mean(locs['lenbuffer']), self.tot_time)
+
+        wandb.log(wandb_dict, step=locs['it'])
+
+        str = f" \033[1m Learning iteration {locs['it']}/{self.current_learning_iteration + locs['num_learning_iterations']} \033[0m "
+
+        if len(locs['rewbuffer']) > 0:
+            log_string = (f"""{'#' * width}\n"""
+                          f"""{str.center(width, ' ')}\n\n"""
+                          f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
+                            'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
+                          f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
+                          f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
+                          f"""{'Discriminator loss:':>{pad}} {locs['mean_disc_loss']:.4f}\n"""
+                          f"""{'Discriminator accuracy:':>{pad}} {locs['mean_disc_acc']:.4f}\n"""
+                          f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
+                          f"""{'Mean reward (total):':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
+                          f"""{'Mean reward (task):':>{pad}} {statistics.mean(locs['rewbuffer']) - statistics.mean(locs['rew_explr_buffer']):.2f}\n"""
+                          f"""{'Mean reward (exploration):':>{pad}} {statistics.mean(locs['rew_explr_buffer']):.2f}\n"""
+                          f"""{'Mean reward (entropy):':>{pad}} {statistics.mean(locs['rew_entropy_buffer']):.2f}\n"""
+                          f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n""")
+                        #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
+                        #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
+            # 新增：打印前向和后向统计
+            if len(locs['rewbuffer_forward']) > 0:
+                log_string += f"""{'Forward mean reward:':>{pad}} {statistics.mean(locs['rewbuffer_forward']):.2f}\n"""
+                log_string += f"""{'Forward mean ep length:':>{pad}} {statistics.mean(locs['lenbuffer_forward']):.2f}\n"""
+            if len(locs['rewbuffer_backward']) > 0:
+                log_string += f"""{'Backward mean reward:':>{pad}} {statistics.mean(locs['rewbuffer_backward']):.2f}\n"""
+                log_string += f"""{'Backward mean ep length:':>{pad}} {statistics.mean(locs['lenbuffer_backward']):.2f}\n"""
+        else:
+            log_string = (f"""{'#' * width}\n"""
+                          f"""{str.center(width, ' ')}\n\n"""
+                          f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
+                            'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
+                          f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
+                          f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
+                          f"""{'Estimator loss:':>{pad}} {locs['mean_estimator_loss']:.4f}\n"""
+                          f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n""")
+                        #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
+                        #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
+
+        log_string += f"""{'-' * width}\n"""
+        log_string += ep_string
+        curr_it = locs['it'] - self.start_learning_iteration
+        eta = self.tot_time / (curr_it + 1) * (locs['num_learning_iterations'] - curr_it)
+        mins = eta // 60
+        secs = eta % 60
+        log_string += (f"""{'-' * width}\n"""
+                       f"""{'Total timesteps:':>{pad}} {self.tot_timesteps}\n"""
+                       f"""{'Iteration time:':>{pad}} {iteration_time:.2f}s\n"""
+                       f"""{'Total time:':>{pad}} {self.tot_time:.2f}s\n"""
+                       f"""{'ETA:':>{pad}} {mins:.0f} mins {secs:.1f} s\n""")
+        print(log_string)
 
     def learn_vision(self, num_learning_iterations, init_at_random_ep_len=False):
         tot_iter = self.current_learning_iteration + num_learning_iterations
@@ -428,103 +570,6 @@ class OnPolicyRunner:
                           f"""{'Delta yaw ok percentage:':>{pad}} {locs['delta_yaw_ok_percentage']:.4f}\n""")
         else:
             log_string = (f"""{'#' * width}\n""")
-
-        log_string += f"""{'-' * width}\n"""
-        log_string += ep_string
-        curr_it = locs['it'] - self.start_learning_iteration
-        eta = self.tot_time / (curr_it + 1) * (locs['num_learning_iterations'] - curr_it)
-        mins = eta // 60
-        secs = eta % 60
-        log_string += (f"""{'-' * width}\n"""
-                       f"""{'Total timesteps:':>{pad}} {self.tot_timesteps}\n"""
-                       f"""{'Iteration time:':>{pad}} {iteration_time:.2f}s\n"""
-                       f"""{'Total time:':>{pad}} {self.tot_time:.2f}s\n"""
-                       f"""{'ETA:':>{pad}} {mins:.0f} mins {secs:.1f} s\n""")
-        print(log_string)
-
-    def log(self, locs, width=80, pad=35):
-        self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
-        self.tot_time += locs['collection_time'] + locs['learn_time']
-        iteration_time = locs['collection_time'] + locs['learn_time']
-
-        ep_string = f''
-        wandb_dict = {}
-        if locs['ep_infos']:
-            for key in locs['ep_infos'][0]:
-                infotensor = torch.tensor([], device=self.device)
-                for ep_info in locs['ep_infos']:
-                    # handle scalar and zero dimensional tensor infos
-                    if not isinstance(ep_info[key], torch.Tensor):
-                        ep_info[key] = torch.Tensor([ep_info[key]])
-                    if len(ep_info[key].shape) == 0:
-                        ep_info[key] = ep_info[key].unsqueeze(0)
-                    infotensor = torch.cat((infotensor, ep_info[key].to(self.device)))
-                value = torch.mean(infotensor)
-                wandb_dict['Episode_rew/' + key] = value
-                ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
-        mean_std = self.alg.actor_critic.std.mean()
-        fps = int(self.num_steps_per_env * self.env.num_envs / (locs['collection_time'] + locs['learn_time']))
-
-        wandb_dict['Loss/value_function'] = ['mean_value_loss']
-        wandb_dict['Loss/surrogate'] = locs['mean_surrogate_loss']
-        wandb_dict['Loss/estimator'] = locs['mean_estimator_loss']
-        wandb_dict['Loss/hist_latent_loss'] = locs['mean_hist_latent_loss']
-        wandb_dict['Loss/priv_reg_loss'] = locs['mean_priv_reg_loss']
-        wandb_dict['Loss/priv_ref_lambda'] = locs['priv_reg_coef']
-        wandb_dict['Loss/entropy_coef'] = locs['entropy_coef']
-        wandb_dict['Loss/learning_rate'] = self.alg.learning_rate
-        wandb_dict['Loss/discriminator'] = locs['mean_disc_loss']
-        wandb_dict['Loss/discriminator_accuracy'] = locs['mean_disc_acc']
-
-        wandb_dict['Policy/mean_noise_std'] = mean_std.item()
-        wandb_dict['Perf/total_fps'] = fps
-        wandb_dict['Perf/collection time'] = locs['collection_time']
-        wandb_dict['Perf/learning_time'] = locs['learn_time']
-        if len(locs['rewbuffer']) > 0:
-            try:
-                self.env.set_curriculum_metric(statistics.mean(locs['rewbuffer']))
-            except Exception:
-                pass
-            wandb_dict['Train/mean_reward'] = statistics.mean(locs['rewbuffer'])
-            wandb_dict['Train/mean_reward_explr'] = statistics.mean(locs['rew_explr_buffer'])
-            wandb_dict['Train/mean_reward_task'] = wandb_dict['Train/mean_reward'] - wandb_dict['Train/mean_reward_explr']
-            wandb_dict['Train/mean_reward_entropy'] = statistics.mean(locs['rew_entropy_buffer'])
-            wandb_dict['Train/mean_episode_length'] = statistics.mean(locs['lenbuffer'])
-            # wandb_dict['Train/mean_reward/time', statistics.mean(locs['rewbuffer']), self.tot_time)
-            # wandb_dict['Train/mean_episode_length/time', statistics.mean(locs['lenbuffer']), self.tot_time)
-
-        wandb.log(wandb_dict, step=locs['it'])
-
-        str = f" \033[1m Learning iteration {locs['it']}/{self.current_learning_iteration + locs['num_learning_iterations']} \033[0m "
-
-        if len(locs['rewbuffer']) > 0:
-            log_string = (f"""{'#' * width}\n"""
-                          f"""{str.center(width, ' ')}\n\n"""
-                          f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
-                            'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
-                          f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
-                          f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
-                          f"""{'Discriminator loss:':>{pad}} {locs['mean_disc_loss']:.4f}\n"""
-                          f"""{'Discriminator accuracy:':>{pad}} {locs['mean_disc_acc']:.4f}\n"""
-                          f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
-                          f"""{'Mean reward (total):':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
-                          f"""{'Mean reward (task):':>{pad}} {statistics.mean(locs['rewbuffer']) - statistics.mean(locs['rew_explr_buffer']):.2f}\n"""
-                          f"""{'Mean reward (exploration):':>{pad}} {statistics.mean(locs['rew_explr_buffer']):.2f}\n"""
-                          f"""{'Mean reward (entropy):':>{pad}} {statistics.mean(locs['rew_entropy_buffer']):.2f}\n"""
-                          f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n""")
-                        #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
-                        #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
-        else:
-            log_string = (f"""{'#' * width}\n"""
-                          f"""{str.center(width, ' ')}\n\n"""
-                          f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
-                            'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
-                          f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
-                          f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
-                          f"""{'Estimator loss:':>{pad}} {locs['mean_estimator_loss']:.4f}\n"""
-                          f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n""")
-                        #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
-                        #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
 
         log_string += f"""{'-' * width}\n"""
         log_string += ep_string

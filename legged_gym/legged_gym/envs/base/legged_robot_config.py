@@ -47,8 +47,10 @@ class LeggedRobotCfg(BaseConfig):
         # n_proprio = 3 + 2 + 3 + 4 + 36 + 5
         n_proprio = 3 + 2 + 3 + 3 + 2 + 36 + 4 # base_ang_vel + imu + delta_yaw + commands + env_class + dof_pos + dof_vel + action_hist + feet = 53
         history_len = 10
+        n_rhythm = 4  # 步态相位编码维度
 
-        num_observations = n_proprio + n_scan + n_priv + n_priv_latent + history_len*n_proprio # 53 + 132 + 9 + 29 + 10*53 = 753
+        # num_observations = n_proprio + n_scan + n_priv + n_priv_latent + history_len*n_proprio # 53 + 132 + 9 + 29 + 10*53 = 753
+        num_observations = n_proprio + n_scan + n_priv + n_priv_latent + history_len*n_proprio + n_rhythm # 53 + 132 + 9 + 29 + 10*53 + 4 =757
         num_privileged_obs = None # if not None a priviledge_obs_buf will be returned by step() (critic obs for assymetric training). None is returned otherwise 
         num_actions = 12
         env_spacing = 3.  # not used with heightfields/trimeshes 
@@ -88,6 +90,10 @@ class LeggedRobotCfg(BaseConfig):
         next_goal_threshold = 0.2
         reach_goal_delay = 0.1
         num_future_goal_obs = 2
+
+    class tms:
+        f1 = 1.0
+        f2 = 2.0
 
     class depth:
         use_camera = False
@@ -315,13 +321,15 @@ class LeggedRobotCfg(BaseConfig):
             # tracking_goal_vel = 1.5
             # tracking_yaw = 0.5
             tracking_lin_vel = 1.5
-            # tracking_lin_vel_forward = 3.0   # 前向权重更高
-            # tracking_lin_vel_backward = 1.5  # 后向权重较低
+            tracking_lin_vel_forward = 3.0   # 前向权重更高
+            tracking_lin_vel_backward = 1.5  # 后向权重较低
             tracking_ang_vel_z = 0.5
             # regularization rewards
             lin_vel_z = -1.0
             ang_vel_xy = -0.05
             orientation = -1.
+            roll_orientation = -0.5
+            pitch_orientation = -0.
             dof_acc = -2.5e-7
             collision = -10.
             action_rate = -0.1

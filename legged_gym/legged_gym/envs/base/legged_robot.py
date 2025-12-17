@@ -2066,19 +2066,19 @@ class LeggedRobot(BaseTask):
     #     rew[stop_mask] *= 2.0
     #     return rew
 
-    # def _reward_tracking_lin_vel_forward(self):
-    #     """追踪前向速度（vx > 0）"""
-    #     forward_mask = self.commands[:, 0] > 0
-    #     lin_vel_error = torch.sum(torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1)
-    #     rew = torch.exp(-lin_vel_error / self.cfg.rewards.tracking_sigma)
-    #     return rew * forward_mask.float()
+    def _reward_tracking_lin_vel_forward(self):
+        """追踪前向速度（vx > 0）"""
+        forward_mask = self.commands[:, 0] > 0
+        lin_vel_error = torch.sum(torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1)
+        rew = torch.exp(-lin_vel_error / self.cfg.rewards.tracking_sigma)
+        return rew * forward_mask.float()
 
-    # def _reward_tracking_lin_vel_backward(self):
-    #     """追踪后向速度（vx < 0）"""
-    #     backward_mask = self.commands[:, 0] < 0
-    #     lin_vel_error = torch.sum(torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1)
-    #     rew = torch.exp(-lin_vel_error / self.cfg.rewards.tracking_sigma)
-    #     return rew * backward_mask.float()
+    def _reward_tracking_lin_vel_backward(self):
+        """追踪后向速度（vx < 0）"""
+        backward_mask = self.commands[:, 0] < 0
+        lin_vel_error = torch.sum(torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1)
+        rew = torch.exp(-lin_vel_error / self.cfg.rewards.tracking_sigma)
+        return rew * backward_mask.float()
 
     def _reward_tracking_lin_vel(self):
         # Tracking of linear velocity commands (xy axes)
@@ -2102,7 +2102,17 @@ class LeggedRobot(BaseTask):
      
     def _reward_orientation(self):
         rew = torch.sum(torch.square(self.projected_gravity[:, :2]), dim=1)
-        rew[self.env_class != 17] = 0.
+        # rew[self.env_class != 17] = 0.
+        return rew
+    
+    def _reward_roll_orientation(self):
+        roll_component = self.projected_gravity[:, 0]
+        rew = torch.square(roll_component)
+        return rew
+    
+    def _reward_pitch_orientation(self):
+        pitch_component = self.projected_gravity[:, 1]
+        rew = torch.square(pitch_component)
         return rew
 
     def _reward_dof_acc(self):
