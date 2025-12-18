@@ -33,6 +33,7 @@ from time import time
 from warnings import WarningMessage
 import numpy as np
 import os
+import math
 
 from isaacgym.torch_utils import *
 from isaacgym import gymtorch, gymapi, gymutil
@@ -448,6 +449,31 @@ class LeggedRobot(BaseTask):
             rew = self._reward_termination() * self.reward_scales["termination"]
             self.rew_buf += rew
             self.episode_sums["termination"] += rew
+
+    def compute_phase_encoding(self):
+        """
+        计算基于时间的傅里叶相位编码
+        使用 episode 内的时间，在真实机器人上可通过计时器获取
+        Returns:
+            phase_obs: (num_envs, 4) - 包含 sin/cos 编码的相位观测
+        """
+        # episode 内的时间（秒）
+        t = self.episode_length_buf.float() * self.dt  # shape: (num_envs,) (seconds)
+        t = t.unsqueeze(-1)  # shape: (num_envs, 1)
+        
+        # 步态相关的频率（Hz）- 可在 config 中配置
+        f1 = getattr(self.cfg.env, 'f1', 1.0)   # 主步态频率，约 1-2 Hz
+        f2 = getattr(self.cfg.env, 'f2', 2.0)   # 高频分量
+        
+        # 计算傅里叶基
+        phase_obs = torch.cat([
+            torch.sin(2 * math.pi * f1 * t),
+            torch.cos(2 * math.pi * f1 * t),
+            torch.sin(2 * math.pi * f2 * t),
+            torch.cos(2 * math.pi * f2 * t),
+        ], dim=-1)  # shape: (num_envs, 4)
+        
+        return phase_obs
     
     def compute_observations(self):
         """ 
@@ -468,6 +494,9 @@ class LeggedRobot(BaseTask):
         else:
             self.delta_yaw = wrap_to_pi(self.target_yaw - self.yaw)
             self.delta_next_yaw = wrap_to_pi(self.next_target_yaw - self.yaw)
+
+        # 计算相位编码
+        phase_obs = self.compute_phase_encoding()  # (num_envs, 4)
 
         obs_buf = torch.cat((#skill_vector, 
                             self.base_ang_vel  * self.obs_scales.ang_vel,   # [1,3]
@@ -494,9 +523,9 @@ class LeggedRobot(BaseTask):
         ), dim=-1)
         if self.cfg.terrain.measure_heights:
             heights = torch.clip(self.root_states[:, 2].unsqueeze(1) - 0.3 - self.measured_heights, -1, 1.)
-            self.obs_buf = torch.cat([obs_buf, heights, priv_explicit, priv_latent, self.obs_history_buf.view(self.num_envs, -1)], dim=-1)
+            self.obs_buf = torch.cat([phase_obs, obs_buf, heights, priv_explicit, priv_latent, self.obs_history_buf.view(self.num_envs, -1)], dim=-1)
         else:
-            self.obs_buf = torch.cat([obs_buf, priv_explicit, priv_latent, self.obs_history_buf.view(self.num_envs, -1)], dim=-1)
+            self.obs_buf = torch.cat([phase_obs, obs_buf, priv_explicit, priv_latent, self.obs_history_buf.view(self.num_envs, -1)], dim=-1)
         # obs_buf[:, 6:8] = 0  # mask yaw in proprioceptive history
         self.obs_history_buf = torch.where(
             (self.episode_length_buf <= 1)[:, None, None], 

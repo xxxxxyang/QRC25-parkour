@@ -206,17 +206,197 @@ class Actor(nn.Module):
         scan = obs[:, self.num_prop:self.num_prop + self.num_scan]
         return self.scan_encoder(scan)
 
+class TMSActor(nn.Module):
+    def __init__(self, num_rhythm,
+                 num_prop, 
+                 num_scan, 
+                 num_actions,
+                 tce_encoder_dims,
+                 scan_encoder_dims,
+                 sme_mlp_dims,
+                 actor_hidden_dims,
+                 priv_encoder_dims, 
+                 num_priv_latent, 
+                 num_priv_explicit, 
+                 num_hist, activation, 
+                 tanh_encoder_output=False) -> None:
+        super().__init__()
+        # prop -> scan -> priv_explicit -> priv_latent -> hist
+        # actor input: prop -> scan -> priv_explicit -> latent
+        self.num_rhythm = num_rhythm
+        self.num_prop = num_prop
+        self.num_scan = num_scan
+        self.num_hist = num_hist
+        self.num_actions = num_actions
+        self.num_priv_latent = num_priv_latent
+        self.num_priv_explicit = num_priv_explicit
+        self.if_scan_encode = scan_encoder_dims is not None and num_scan > 0
+
+        # TODO: 添加r(t) encoder
+        # TODO: 修改actor_backbone 先拆出来后面再添加decoder
+        # TODO: 添加modulation模块 使用 FiLM 调制
+        # TODO: 修改forward函数
+
+        # temporal coordinate encoder
+        assert len(tce_encoder_dims) > 0, "tce_encoder_dims must be non-empty"
+        tce_layers = []
+        tce_layers.append(nn.Linear(num_rhythm, tce_encoder_dims[0]))
+        tce_layers.append(activation)
+        for l in range(len(tce_encoder_dims) - 1):
+            if l == len(tce_encoder_dims) - 2:
+                tce_layers.append(nn.Linear(tce_encoder_dims[l], tce_encoder_dims[l+1]))
+                tce_layers.append(nn.Tanh())
+            else:
+                tce_layers.append(nn.Linear(tce_encoder_dims[l], tce_encoder_dims[l+1]))
+                tce_layers.append(activation)
+        self.tce = nn.Sequential(*tce_layers)
+        self.tce_latent_dim = tce_encoder_dims[-1]
+
+        if len(priv_encoder_dims) > 0:
+                    priv_encoder_layers = []
+                    priv_encoder_layers.append(nn.Linear(num_priv_latent, priv_encoder_dims[0]))
+                    priv_encoder_layers.append(activation)
+                    for l in range(len(priv_encoder_dims) - 1):
+                        priv_encoder_layers.append(nn.Linear(priv_encoder_dims[l], priv_encoder_dims[l + 1]))
+                        priv_encoder_layers.append(activation)
+                    self.priv_encoder = nn.Sequential(*priv_encoder_layers)
+                    self.priv_encoder_output_dim = priv_encoder_dims[-1]
+        else:
+            self.priv_encoder = nn.Identity()
+            self.priv_encoder_output_dim = num_priv_latent
+
+        self.history_encoder = StateHistoryEncoder(activation, self.num_prop, num_hist, self.priv_encoder_output_dim)
+
+        if self.if_scan_encode:
+            scan_encoder = []
+            scan_encoder.append(nn.Linear(num_scan, scan_encoder_dims[0]))
+            scan_encoder.append(activation)
+            for l in range(len(scan_encoder_dims) - 1):
+                if l == len(scan_encoder_dims) - 2:
+                    scan_encoder.append(nn.Linear(scan_encoder_dims[l], scan_encoder_dims[l+1]))
+                    scan_encoder.append(nn.Tanh())
+                else:
+                    scan_encoder.append(nn.Linear(scan_encoder_dims[l], scan_encoder_dims[l + 1]))
+                    scan_encoder.append(activation)
+            self.scan_encoder = nn.Sequential(*scan_encoder)
+            self.scan_encoder_output_dim = scan_encoder_dims[-1]
+        else:
+            self.scan_encoder = nn.Identity()
+            self.scan_encoder_output_dim = num_scan
+
+        # state manifold encoder
+        assert len(sme_mlp_dims) > 0, "sme_mlp_dims must be non-empty"
+        sme_layers = []
+        sme_layers.append(nn.Linear(self.num_prop+
+                                    self.scan_encoder_output_dim+
+                                    self.num_priv_explicit+
+                                    self.priv_encoder_output_dim, 
+                                        sme_mlp_dims[0]))
+        sme_layers.append(activation)
+        for l in range(len(sme_mlp_dims) - 1):
+            if l == len(sme_mlp_dims) - 2:
+                sme_layers.append(nn.Linear(sme_mlp_dims[l], sme_mlp_dims[l+1]))
+                sme_layers.append(nn.Tanh())
+            else:
+                sme_layers.append(nn.Linear(sme_mlp_dims[l], sme_mlp_dims[l+1]))
+                sme_layers.append(activation)
+        self.sme_mlp = nn.Sequential(*sme_layers)
+        self.sme_latent_dim = sme_mlp_dims[-1]
+
+        # modulation module
+        self.film = nn.Sequential(
+            nn.Linear(self.tce_latent_dim, self.sme_latent_dim * 2)
+        )
+
+        # action decoder (output action)
+        actor_decoder_layers = []
+        actor_decoder_layers.append(nn.Linear(self.sme_latent_dim, actor_hidden_dims[0]))
+        actor_decoder_layers.append(activation)
+        for l in range(len(actor_hidden_dims)):
+            if l == len(actor_hidden_dims) - 1:
+                # 最后一层输出动作，维度为 num_actions
+                actor_decoder_layers.append(nn.Linear(actor_hidden_dims[l], self.num_actions))
+            else:
+                actor_decoder_layers.append(nn.Linear(actor_hidden_dims[l], actor_hidden_dims[l+1]))
+                actor_decoder_layers.append(activation)
+        if tanh_encoder_output:
+            actor_decoder_layers.append(nn.Tanh())
+        self.actor_decoder = nn.Sequential(*actor_decoder_layers)
+
+    def forward(self, obs, hist_encoding: bool, eval=False, scandots_latent=None):
+        if not eval:
+            tce_latent = self.tce(obs[:, :self.num_rhythm])
+            if self.if_scan_encode:
+                obs_scan = obs[:, self.num_rhythm+self.num_prop : self.num_rhythm+self.num_prop+self.num_scan]
+                if scandots_latent is None:
+                    scan_latent = self.scan_encoder(obs_scan)   
+                else:
+                    scan_latent = scandots_latent
+                obs_prop_scan = torch.cat([obs[:, self.num_rhythm : self.num_rhythm+self.num_prop], scan_latent], dim=1)
+            else:
+                obs_prop_scan = obs[:, self.num_rhythm : self.num_rhythm+self.num_prop+self.num_scan]
+            obs_priv_explicit = obs[:, self.num_rhythm+self.num_prop+self.num_scan : self.num_rhythm+self.num_prop+self.num_scan+self.num_priv_explicit]
+            if hist_encoding:
+                priv_latent = self.infer_hist_latent(obs)
+            else:
+                priv_latent = self.infer_priv_latent(obs)
+            sme_latent = self.sme_mlp(torch.cat([obs_prop_scan, obs_priv_explicit, priv_latent], dim=1))
+            modulated_latent = self.film_modulate(tce_latent, sme_latent)
+            action = self.actor_decoder(modulated_latent)
+            return action
+        else:
+            tce_latent = self.tce(obs[:, :self.num_rhythm])
+            if self.if_scan_encode:
+                obs_scan = obs[:, self.num_rhythm+self.num_prop : self.num_rhythm+self.num_prop+self.num_scan]
+                if scandots_latent is None:
+                    scan_latent = self.scan_encoder(obs_scan)   
+                else:
+                    scan_latent = scandots_latent
+                obs_prop_scan = torch.cat([obs[:, self.num_rhythm : self.num_rhythm+self.num_prop], scan_latent], dim=1)
+            else:
+                obs_prop_scan = obs[:, self.num_rhythm : self.num_rhythm+self.num_prop+self.num_scan]
+            obs_priv_explicit = obs[:, self.num_rhythm+self.num_prop+self.num_scan : self.num_rhythm+self.num_prop+self.num_scan+self.num_priv_explicit]
+            if hist_encoding:
+                priv_latent = self.infer_hist_latent(obs)
+            else:
+                priv_latent = self.infer_priv_latent(obs)
+            sme_latent = self.sme_mlp(torch.cat([obs_prop_scan, obs_priv_explicit, priv_latent], dim=1))
+            modulated_latent = self.film_modulate(tce_latent, sme_latent)
+            action = self.actor_decoder(modulated_latent)
+            return action
+        
+    def film_modulate(self, tce_latent, sme_latent):
+        gamma_beta = self.film(tce_latent)
+        gamma, beta = torch.chunk(gamma_beta, 2, dim=-1)
+        modulated = sme_latent * (1 + gamma) + beta
+        return modulated
+    
+    def infer_priv_latent(self, obs):
+        priv = obs[:, self.num_rhythm+self.num_prop+self.num_scan+self.num_priv_explicit : self.num_rhythm+self.num_prop+self.num_scan+self.num_priv_explicit+self.num_priv_latent]
+        return self.priv_encoder(priv)
+    
+    def infer_hist_latent(self, obs):
+        hist = obs[:, -self.num_hist*self.num_prop:]
+        return self.history_encoder(hist.view(-1, self.num_hist, self.num_prop))
+    
+    def infer_scandots_latent(self, obs):
+        scan = obs[:, self.num_rhythm+self.num_prop : self.num_rhythm+self.num_prop+self.num_scan]
+        return self.scan_encoder(scan)
+
 class ActorCriticRMA(nn.Module):
     is_recurrent = False
-    def __init__(self,  num_prop,
+    def __init__(self,  num_rhythm,
+                        num_prop,
                         num_scan,
                         num_critic_obs,
                         num_priv_latent, 
                         num_priv_explicit,
                         num_hist,
                         num_actions,
+                        tce_encoder_dims=[32, 32],
                         scan_encoder_dims=[256, 256, 256],
-                        actor_hidden_dims=[256, 256, 256],
+                        sme_mlp_dims=[256, 256],
+                        actor_hidden_dims=[256, 256],
                         critic_hidden_dims=[256, 256, 256],
                         activation='elu',
                         init_noise_std=1.0,
@@ -229,7 +409,15 @@ class ActorCriticRMA(nn.Module):
         priv_encoder_dims= kwargs['priv_encoder_dims']
         activation = get_activation(activation)
         
-        self.actor = Actor(num_prop, num_scan, num_actions, scan_encoder_dims, actor_hidden_dims, priv_encoder_dims, num_priv_latent, num_priv_explicit, num_hist, activation, tanh_encoder_output=kwargs['tanh_encoder_output'])
+        # self.actor = Actor(num_prop, num_scan, num_actions, scan_encoder_dims, actor_hidden_dims, priv_encoder_dims, num_priv_latent, num_priv_explicit, num_hist, activation, tanh_encoder_output=kwargs['tanh_encoder_output'])
+        self.actor = TMSActor(num_rhythm, num_prop, num_scan, num_actions, 
+                              tce_encoder_dims,
+                              scan_encoder_dims, 
+                              sme_mlp_dims,
+                              actor_hidden_dims, 
+                              priv_encoder_dims, 
+                              num_priv_latent, num_priv_explicit, num_hist, 
+                              activation, tanh_encoder_output=kwargs['tanh_encoder_output'])
         
 
         # Value function
