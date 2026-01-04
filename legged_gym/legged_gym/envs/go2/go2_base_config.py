@@ -83,6 +83,19 @@ class Go2BaseCfg( LeggedRobotCfg ):
             tracking_lin_vel_backward = 1.5  # 后向权重较低
             tracking_ang_vel_z = 1.0
             # regularization rewards
+            # lin_vel_z = -0
+            # stand_still = -0.
+            # orientation = -0.0
+            # roll_orientation = -0.
+            # pitch_orientation = -0.
+            # feet_phase = -0
+            # feet_contact_balance = -0.
+            # lazy_stop = -0
+            # dof_error = -0.2
+            # base_height = -0.
+            # torques = -1.0e-6
+            # delta_torques = -2.0e-7
+
             lin_vel_z = -1.5
             stand_still = -0.2
             orientation = -0.0
@@ -91,11 +104,9 @@ class Go2BaseCfg( LeggedRobotCfg ):
             feet_phase = -1.5
             feet_contact_balance = -0.5
             lazy_stop = -1.0
-            dof_error = -0.2
             base_height = -0.1
             torques = -1.0e-6
             delta_torques = -2.0e-7
-            feet_contact_balance = -1.0
 
     class depth( LeggedRobotCfg.depth ):
         # position = [0.32, 0.0, 0.035]  # front camera

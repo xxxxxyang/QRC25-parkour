@@ -3,6 +3,7 @@ import torch.nn as nn
 
 class GatedRecurrentBelief(nn.Module):
     def __init__(self, base_backbone, env_cfg, policy_cfg, 
+                 num_rhythm=4, conf_latent_dim=256,
                  belief_dim=32, rnn_hidden=512, extero_dim=None) -> None:
         super().__init__()
 
@@ -29,13 +30,18 @@ class GatedRecurrentBelief(nn.Module):
                           batch_first=True)
         # Encoder Gate Networks (g_a, g_b)
         self.g_a = nn.Sequential(
-            nn.Linear(rnn_hidden, 128),
+            nn.Linear(rnn_hidden+num_rhythm+conf_latent_dim, 256),
             activation,
-            nn.Linear(128, extero_dim)       # output gate vector α size = extero_dim
+            nn.Linear(256, 128),       # output gate vector α size = extero_dim
+            activation,
+            nn.Linear(128, extero_dim)
         )
         self.g_b = nn.Sequential(
-            nn.Linear(rnn_hidden, belief_dim),
-            activation
+            nn.Linear(rnn_hidden+num_rhythm+conf_latent_dim, 256),
+            activation,
+            nn.Linear(256, 128),       # output size = belief_dim
+            activation,
+            nn.Linear(128, belief_dim)
         )
         # learnable projections only if extero_dim != belief_dim
         if extero_dim != belief_dim:
@@ -45,18 +51,20 @@ class GatedRecurrentBelief(nn.Module):
             self.extero_to_belief_proj = None
             self.gate_proj = None
         # Decoder Modules (for training)
-        self.belief_decoder = BeliefDecoder(rnn_hidden, extero_dim, env_cfg.env.n_scan)
+        self.belief_decoder = BeliefDecoder(rnn_hidden+num_rhythm+conf_latent_dim, extero_dim, env_cfg.env.n_scan)
 
         self.last_activation = last_activation
         self.hidden_states = None
         self.extero_dim = extero_dim
         self.belief_dim = belief_dim
 
-    def forward(self, depth_image, proprioception):
+    def forward(self, depth_image, proprioception, r_t, conf_latent):
         """
         Args:
             depth_image (Tensor): extero input (e.g. depth image) with shape [B, H, W].
             proprioception (Tensor): proprioceptive input with shape [B, proprio_dim].
+            r_t (Tensor): rhythm encoding with shape [B, num_rhythm].
+            conf_latent (Tensor): latent encoding from the configuration encoder with shape [B, conf_latent_dim].
         Returns:
             dict: {
                 "belief": Tensor [B, belief_dim],         # belief state b_t
@@ -77,10 +85,10 @@ class GatedRecurrentBelief(nn.Module):
         rnn_in = fused.unsqueeze(1)                         # [B, 1, belief_dim]
         b_prime, self.hidden_states = self.rnn(rnn_in, self.hidden_states)
         b_prime = b_prime.squeeze(1)                        # [B, hidden]
-        # gate α = sigmoid(g_a(b_prime))
-        gate_alpha = torch.sigmoid(self.g_a(b_prime))       # [B, extero_dim]
-        # belief b_t = g_b(b′_t) + α * extero_latent
-        b_proj = self.g_b(b_prime)                          # [B, belief_dim]
+        # gate α = sigmoid(g_a(modulated_belief))
+        modulated_belief = torch.cat((b_prime, r_t, conf_latent), dim=-1)  # [B, hidden + num_rhythm + conf_latent_dim]
+        gate_alpha = torch.sigmoid(self.g_a(modulated_belief))       # [B, extero_dim]
+        b_proj = self.g_b(modulated_belief)                          # [B, belief_dim]
         # expand extero_latent to belief_dim if needed
         if extero_latent.size(-1) != self.belief_dim:
             # project extero_latent to match belief_dim
@@ -89,12 +97,13 @@ class GatedRecurrentBelief(nn.Module):
         else:
             extero_to_belief = extero_latent
             gate_alpha = gate_alpha
+        # belief b_t = g_b(modulated_belief) + α * extero_latent
         belief = b_proj + gate_alpha[:, :self.belief_dim] * extero_to_belief
         belief = self.last_activation(belief)
         # Decoder (reconstruction height map for training)
         # alpha * extero_latent + mlp(h_t)
         if self.belief_decoder is not None:
-            recon_extero, dec_alpha = self.belief_decoder(b_prime, extero_latent)  # recon_extero: [B, scandot_dim] reconstuct scandot
+            recon_extero, dec_alpha = self.belief_decoder(modulated_belief, extero_latent)  # recon_extero: [B, scandot_dim] reconstuct scandot
         else:
             recon_extero, dec_alpha = None, None
 
@@ -286,153 +295,153 @@ class BeliefDecoder(nn.Module):
 #         out = self.out_proj(weighted)  # [B, extero_dim]
 #         return out
 
-def update_belief_actor(self, scandots_batch, actions_student_batch=None, actions_teacher_batch=None, recon_batch=None):
-    if not self.if_depth:
-        return 0.0, 0.0, 0.0
+# def update_belief_actor(self, scandots_batch, actions_student_batch=None, actions_teacher_batch=None, recon_batch=None):
+#     if not self.if_depth:
+#         return 0.0, 0.0, 0.0
 
-    device = self.device
+#     device = self.device
 
-    # ============================
-    # 1. Compute raw task losses
-    # ============================
+#     # ============================
+#     # 1. Compute raw task losses
+#     # ============================
 
-    # Reconstruction MSE loss
-    if recon_batch is not None and scandots_batch is not None:
-        recon_loss_raw = nn.functional.mse_loss(
-            recon_batch,
-            scandots_batch.detach()
-        )
-    else:
-        recon_loss_raw = torch.tensor(0.0, device=device)
+#     # Reconstruction MSE loss
+#     if recon_batch is not None and scandots_batch is not None:
+#         recon_loss_raw = nn.functional.mse_loss(
+#             recon_batch,
+#             scandots_batch.detach()
+#         )
+#     else:
+#         recon_loss_raw = torch.tensor(0.0, device=device)
 
-    # Action imitation L2 loss
-    if actions_student_batch is not None and actions_teacher_batch is not None:
-        l2_per_sample = torch.norm(
-            actions_student_batch - actions_teacher_batch.detach(),
-            p=2,
-            dim=-1
-        )
-        action_loss_raw = l2_per_sample.mean()
-    else:
-        action_loss_raw = torch.tensor(0.0, device=device)
+#     # Action imitation L2 loss
+#     if actions_student_batch is not None and actions_teacher_batch is not None:
+#         l2_per_sample = torch.norm(
+#             actions_student_batch - actions_teacher_batch.detach(),
+#             p=2,
+#             dim=-1
+#         )
+#         action_loss_raw = l2_per_sample.mean()
+#     else:
+#         action_loss_raw = torch.tensor(0.0, device=device)
 
-    # Vector: raw losses (these represent true task performance)
-    L_raw = torch.stack([recon_loss_raw, action_loss_raw])
+#     # Vector: raw losses (these represent true task performance)
+#     L_raw = torch.stack([recon_loss_raw, action_loss_raw])
 
-    # =======================================
-    # 2. Initialize EMA for loss normalization
-    # =======================================
-    if not hasattr(self, "loss_ema"):
-        self.ema_decay = 0.99
-        self.loss_ema = {
-            "recon": None,
-            "action": None
-        }
+#     # =======================================
+#     # 2. Initialize EMA for loss normalization
+#     # =======================================
+#     if not hasattr(self, "loss_ema"):
+#         self.ema_decay = 0.99
+#         self.loss_ema = {
+#             "recon": None,
+#             "action": None
+#         }
 
-    # Update EMAs
-    def update_ema(name, value):
-        v = value.detach()
-        if self.loss_ema[name] is None:
-            self.loss_ema[name] = v.clone()
-        else:
-            self.loss_ema[name] = (
-                self.ema_decay * self.loss_ema[name] +
-                (1 - self.ema_decay) * v
-            )
+#     # Update EMAs
+#     def update_ema(name, value):
+#         v = value.detach()
+#         if self.loss_ema[name] is None:
+#             self.loss_ema[name] = v.clone()
+#         else:
+#             self.loss_ema[name] = (
+#                 self.ema_decay * self.loss_ema[name] +
+#                 (1 - self.ema_decay) * v
+#             )
 
-    update_ema("recon", recon_loss_raw)
-    update_ema("action", action_loss_raw)
+#     update_ema("recon", recon_loss_raw)
+#     update_ema("action", action_loss_raw)
 
-    # ===============================
-    # 3. Normalized losses for GradNorm
-    # ===============================
+#     # ===============================
+#     # 3. Normalized losses for GradNorm
+#     # ===============================
 
-    recon_loss_norm = recon_loss_raw / (self.loss_ema["recon"] + 1e-8)
-    action_loss_norm = action_loss_raw / (self.loss_ema["action"] + 1e-8)
+#     recon_loss_norm = recon_loss_raw / (self.loss_ema["recon"] + 1e-8)
+#     action_loss_norm = action_loss_raw / (self.loss_ema["action"] + 1e-8)
 
-    L = torch.stack([recon_loss_norm, action_loss_norm])  # normalized losses
+#     L = torch.stack([recon_loss_norm, action_loss_norm])  # normalized losses
 
-    # =================================================
-    # 4. Initialize reference losses (for GradNorm ratios)
-    # =================================================
-    if self.initial_losses is None:
-        self.initial_losses = L.detach().clone()
+#     # =================================================
+#     # 4. Initialize reference losses (for GradNorm ratios)
+#     # =================================================
+#     if self.initial_losses is None:
+#         self.initial_losses = L.detach().clone()
 
-    # ================================
-    # 5. Compute gradient norms G_i
-    # ================================
-    shared_params = self.gradnorm_shared_params
-    G_list = []
+#     # ================================
+#     # 5. Compute gradient norms G_i
+#     # ================================
+#     shared_params = self.gradnorm_shared_params
+#     G_list = []
 
-    for i in range(L.numel()):
-        grads = torch.autograd.grad(
-            outputs=(self.task_weights[i] * L[i]),
-            inputs=shared_params,
-            retain_graph=True,
-            create_graph=True,
-            allow_unused=True
-        )
+#     for i in range(L.numel()):
+#         grads = torch.autograd.grad(
+#             outputs=(self.task_weights[i] * L[i]),
+#             inputs=shared_params,
+#             retain_graph=True,
+#             create_graph=True,
+#             allow_unused=True
+#         )
 
-        flat_grads = []
-        for g, p in zip(grads, shared_params):
-            if g is None:
-                flat_grads.append(torch.zeros_like(p).view(-1))
-            else:
-                flat_grads.append(g.contiguous().view(-1))
+#         flat_grads = []
+#         for g, p in zip(grads, shared_params):
+#             if g is None:
+#                 flat_grads.append(torch.zeros_like(p).view(-1))
+#             else:
+#                 flat_grads.append(g.contiguous().view(-1))
 
-        if len(flat_grads) == 0:
-            g_norm = torch.tensor(0.0, device=device)
-        else:
-            g_norm = torch.norm(torch.cat(flat_grads), p=2)
+#         if len(flat_grads) == 0:
+#             g_norm = torch.tensor(0.0, device=device)
+#         else:
+#             g_norm = torch.norm(torch.cat(flat_grads), p=2)
 
-        G_list.append(g_norm)
+#         G_list.append(g_norm)
 
-    G = torch.stack(G_list)
-    G_avg = G.mean().detach()
+#     G = torch.stack(G_list)
+#     G_avg = G.mean().detach()
 
-    # ==========================================
-    # 6. Compute target gradient magnitudes
-    # ==========================================
-    loss_ratio = L.detach() / (self.initial_losses + 1e-12)
-    r_i = loss_ratio / (loss_ratio.mean() + 1e-12)
+#     # ==========================================
+#     # 6. Compute target gradient magnitudes
+#     # ==========================================
+#     loss_ratio = L.detach() / (self.initial_losses + 1e-12)
+#     r_i = loss_ratio / (loss_ratio.mean() + 1e-12)
 
-    target_G = G_avg * (r_i ** self.gradnorm_alpha)
+#     target_G = G_avg * (r_i ** self.gradnorm_alpha)
 
-    # ==========================================
-    # 7. Compute GradNorm loss and update weights
-    # ==========================================
-    gradnorm_loss = torch.abs(G - target_G).sum()
+#     # ==========================================
+#     # 7. Compute GradNorm loss and update weights
+#     # ==========================================
+#     gradnorm_loss = torch.abs(G - target_G).sum()
 
-    self.task_weight_optimizer.zero_grad()
-    gradnorm_loss.backward(retain_graph=True)
-    self.task_weight_optimizer.step()
+#     self.task_weight_optimizer.zero_grad()
+#     gradnorm_loss.backward(retain_graph=True)
+#     self.task_weight_optimizer.step()
 
-    # Normalize weights to sum to K
-    with torch.no_grad():
-        w = self.task_weights
-        K = float(L.numel())
-        w[:] = K * w / (w.sum() + 1e-12)
+#     # Normalize weights to sum to K
+#     with torch.no_grad():
+#         w = self.task_weights
+#         K = float(L.numel())
+#         w[:] = K * w / (w.sum() + 1e-12)
 
-    # ==========================================
-    # 8. Update encoder + actor using weighted loss
-    # ==========================================
-    weighted_loss = (self.task_weights * L).sum()
+#     # ==========================================
+#     # 8. Update encoder + actor using weighted loss
+#     # ==========================================
+#     weighted_loss = (self.task_weights * L).sum()
 
-    self.depth_actor_optimizer.zero_grad()
-    weighted_loss.backward()
+#     self.depth_actor_optimizer.zero_grad()
+#     weighted_loss.backward()
 
-    nn.utils.clip_grad_norm_(
-        list(self.depth_encoder.parameters()) +
-        list(self.depth_actor.parameters()),
-        self.max_grad_norm
-    )
-    self.depth_actor_optimizer.step()
+#     nn.utils.clip_grad_norm_(
+#         list(self.depth_encoder.parameters()) +
+#         list(self.depth_actor.parameters()),
+#         self.max_grad_norm
+#     )
+#     self.depth_actor_optimizer.step()
 
-    # =====================================================
-    # Return raw losses (not normalized ones!)
-    # =====================================================
-    return (
-        recon_loss_raw.item(),
-        action_loss_raw.item(),
-        weighted_loss.item()
-    )
+#     # =====================================================
+#     # Return raw losses (not normalized ones!)
+#     # =====================================================
+#     return (
+#         recon_loss_raw.item(),
+#         action_loss_raw.item(),
+#         weighted_loss.item()
+#     )

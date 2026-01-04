@@ -207,6 +207,12 @@ class Actor(nn.Module):
         return self.scan_encoder(scan)
 
 class TMSActor(nn.Module):
+    """
+    添加 r(t) encoder
+    修改 actor_backbone 先拆出来后面再添加 decoder 输出动作
+    添加 modulation模块 使用 FiLM 调制
+    修改 forward函数
+    """
     def __init__(self, num_rhythm,
                  num_prop, 
                  num_scan, 
@@ -221,8 +227,6 @@ class TMSActor(nn.Module):
                  num_hist, activation, 
                  tanh_encoder_output=False) -> None:
         super().__init__()
-        # prop -> scan -> priv_explicit -> priv_latent -> hist
-        # actor input: prop -> scan -> priv_explicit -> latent
         self.num_rhythm = num_rhythm
         self.num_prop = num_prop
         self.num_scan = num_scan
@@ -231,11 +235,6 @@ class TMSActor(nn.Module):
         self.num_priv_latent = num_priv_latent
         self.num_priv_explicit = num_priv_explicit
         self.if_scan_encode = scan_encoder_dims is not None and num_scan > 0
-
-        # TODO: 添加r(t) encoder
-        # TODO: 修改actor_backbone 先拆出来后面再添加decoder
-        # TODO: 添加modulation模块 使用 FiLM 调制
-        # TODO: 修改forward函数
 
         # temporal coordinate encoder
         assert len(tce_encoder_dims) > 0, "tce_encoder_dims must be non-empty"
@@ -304,9 +303,10 @@ class TMSActor(nn.Module):
         self.sme_latent_dim = sme_mlp_dims[-1]
 
         # modulation module
-        self.film = nn.Sequential(
-            nn.Linear(self.tce_latent_dim, self.sme_latent_dim * 2)
-        )
+        self.film = nn.Linear(self.tce_latent_dim, self.sme_latent_dim * 2)
+        self.gru_cell = nn.GRUCell(self.sme_latent_dim, self.sme_latent_dim)
+        self.hidden_state = None
+        self.gru_ln = nn.LayerNorm(self.sme_latent_dim)  # LayerNorm
 
         # action decoder (output action)
         actor_decoder_layers = []
@@ -314,7 +314,7 @@ class TMSActor(nn.Module):
         actor_decoder_layers.append(activation)
         for l in range(len(actor_hidden_dims)):
             if l == len(actor_hidden_dims) - 1:
-                # 最后一层输出动作，维度为 num_actions
+                # output_dim: num_actions
                 actor_decoder_layers.append(nn.Linear(actor_hidden_dims[l], self.num_actions))
             else:
                 actor_decoder_layers.append(nn.Linear(actor_hidden_dims[l], actor_hidden_dims[l+1]))
@@ -341,7 +341,7 @@ class TMSActor(nn.Module):
             else:
                 priv_latent = self.infer_priv_latent(obs)
             sme_latent = self.sme_mlp(torch.cat([obs_prop_scan, obs_priv_explicit, priv_latent], dim=1))
-            modulated_latent = self.film_modulate(tce_latent, sme_latent)
+            modulated_latent = self.modulate(tce_latent, sme_latent)
             action = self.actor_decoder(modulated_latent)
             return action
         else:
@@ -361,15 +361,59 @@ class TMSActor(nn.Module):
             else:
                 priv_latent = self.infer_priv_latent(obs)
             sme_latent = self.sme_mlp(torch.cat([obs_prop_scan, obs_priv_explicit, priv_latent], dim=1))
-            modulated_latent = self.film_modulate(tce_latent, sme_latent)
+            modulated_latent = self.modulate(tce_latent, sme_latent)
             action = self.actor_decoder(modulated_latent)
             return action
         
-    def film_modulate(self, tce_latent, sme_latent):
+    def modulate(self, tce_latent, sme_latent):
+        # FiLM
         gamma_beta = self.film(tce_latent)
         gamma, beta = torch.chunk(gamma_beta, 2, dim=-1)
-        modulated = sme_latent * (1 + gamma) + beta
+        film_out = sme_latent * (1 + gamma) + beta
+        if self.hidden_state is None or self.hidden_state.shape[0] != sme_latent.shape[0]:
+            self.hidden_state = torch.zeros_like(sme_latent)
+        self.hidden_state = self.gru_cell(film_out, self.hidden_state)
+        # residual
+        modulated = self.gru_ln(film_out + self.hidden_state)
         return modulated
+
+    def init_hidden(self, batch_size, device):
+        self.hidden_state = torch.zeros(batch_size, self.sme_latent_dim, device=device)
+
+    def reset_hidden(self, dones=None):
+        """Reset hidden states for terminated episodes (GRUCell version).
+        Args:
+            dones: bool/float tensor, shape (B,) or (B, 1)
+                   True/1.0 = episode terminated, need to reset
+        """
+        if self.hidden_state is None or dones is None:
+            return
+        # Normalize dones to (B,) bool tensor
+        if dones.dim() > 1:
+            dones = dones.squeeze(-1)  # (B, 1) -> (B,)
+        dones = dones.to(torch.bool)   # ensure bool type
+        # GRUCell hidden state: (B, hidden_dim)
+        # Create mask: (B, 1) to broadcast across hidden_dim
+        mask = (~dones).float().unsqueeze(-1)  # (B,) -> (B, 1)
+        # Element-wise multiplication (preserves gradients for BPTT)
+        self.hidden_state = self.hidden_state * mask
+
+    def detach_hidden_states(self):
+        """Detach hidden states to prevent backprop through too many steps.
+        Call this at the end of each rollout step to limit BPTT depth.
+        """
+        if self.hidden_state is not None:
+            self.hidden_state = self.hidden_state.detach()
+
+    def get_hidden_states(self):
+        return self.hidden_state   # (num_envs, H) or None
+    # def get_hidden_states(self):
+    #     h = self.hidden_state   # (num_envs, H) or None
+    #     if h is None:
+    #         return (None, None)
+    #     if h.dim() == 2:    # (B, H) -> (1, B, H)
+    #         h = h.unsqueeze(0)
+    #     return (h, h)    # actor, critic placeholder(critic not using RNN here)
     
     def infer_priv_latent(self, obs):
         priv = obs[:, self.num_rhythm+self.num_prop+self.num_scan+self.num_priv_explicit : self.num_rhythm+self.num_prop+self.num_scan+self.num_priv_explicit+self.num_priv_latent]
@@ -384,7 +428,7 @@ class TMSActor(nn.Module):
         return self.scan_encoder(scan)
 
 class ActorCriticRMA(nn.Module):
-    is_recurrent = False
+    is_recurrent = True # False # True if using RNNs in actor and/or critic
     def __init__(self,  num_rhythm,
                         num_prop,
                         num_scan,
@@ -441,6 +485,14 @@ class ActorCriticRMA(nn.Module):
         # seems that we get better performance without init
         # self.init_memory_weights(self.memory_a, 0.001, 0.)
         # self.init_memory_weights(self.memory_c, 0.001, 0.)
+
+    def get_hidden_states(self):
+        h = self.actor.get_hidden_states()   # (num_envs, H) or None
+        if h is None:
+            return (None, None)
+        if h.dim() == 2:    # (B, H) -> (1, B, H)
+            h = h.unsqueeze(0)
+        return (h, h)    # actor, critic placeholder(critic not using RNN here)
     
     @staticmethod
     # not used at the moment

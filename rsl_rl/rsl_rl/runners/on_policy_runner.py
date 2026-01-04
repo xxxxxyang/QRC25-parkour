@@ -86,7 +86,7 @@ class OnPolicyRunner:
                                                     self.depth_encoder_cfg["hidden_dims"],
                                                     )
             # depth_encoder = RecurrentDepthBackbone(depth_backbone, env.cfg, self.policy_cfg).to(self.device)
-            depth_encoder = GatedRecurrentBelief(depth_backbone, env.cfg, self.policy_cfg, belief_dim=32).to(self.device)
+            depth_encoder = GatedRecurrentBelief(depth_backbone, env.cfg, self.policy_cfg, conf_latent_dim=256, belief_dim=32).to(self.device)
             depth_actor = deepcopy(actor_critic.actor)
         else:
             depth_encoder = None
@@ -151,7 +151,7 @@ class OnPolicyRunner:
         rew_explr_buffer = deque(maxlen=100)
         rew_entropy_buffer = deque(maxlen=100)
         lenbuffer = deque(maxlen=100)
-        # 新增：前向和后向命令的统计缓冲区
+        # buffers for forward and backward command statistics
         rewbuffer_forward = deque(maxlen=100)
         lenbuffer_forward = deque(maxlen=100)
         rewbuffer_backward = deque(maxlen=100)
@@ -160,58 +160,55 @@ class OnPolicyRunner:
         cur_reward_explr_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
         cur_reward_entropy_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
         cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
-        # 新增：记录每个环境的主要命令方向（基于累积的 vx 命令）
+        # save command direction sum
         cur_cmd_x_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
 
         tot_iter = self.current_learning_iteration + num_learning_iterations
         self.start_learning_iteration = copy(self.current_learning_iteration)
 
+        ##### learning iterations #####
         for it in range(self.current_learning_iteration, tot_iter):
             start = time.time()
             hist_encoding = it % self.dagger_update_freq == 0
 
-            # Rollout
+            ### Rollout ###
             with torch.inference_mode():
                 for i in range(self.num_steps_per_env):
+                    ## Interact and collect data 
                     actions = self.alg.act(obs, critic_obs, infos, hist_encoding)
+                    self.alg.actor_critic.actor.detach_hidden_states()
                     obs, privileged_obs, rewards, dones, infos = self.env.step(actions)  # obs has changed to next_obs !! if done obs has been reset
                     critic_obs = privileged_obs if privileged_obs is not None else obs
                     obs, critic_obs, rewards, dones = obs.to(self.device), critic_obs.to(self.device), rewards.to(self.device), dones.to(self.device)
+                    # Reset actor's hidden state for done environments
+                    self.alg.actor_critic.actor.reset_hidden(dones)
                     total_rew = self.alg.process_env_step(rewards, dones, infos)
 
+                    ## Book keeping
                     if self.log_dir is not None:
-                        # Book keeping
                         if 'episode' in infos:
                             ep_infos.append(infos['episode'])
                         cur_reward_sum += total_rew
                         cur_reward_explr_sum += 0
                         cur_reward_entropy_sum += 0
                         cur_episode_length += 1
-                        
-                        # 新增：累积命令方向
                         cur_cmd_x_sum += self.env.commands[:, 0]
-
                         new_ids = (dones > 0).nonzero(as_tuple=False)
-                        
                         rewbuffer.extend(cur_reward_sum[new_ids][:, 0].cpu().numpy().tolist())
                         rew_explr_buffer.extend(cur_reward_explr_sum[new_ids][:, 0].cpu().numpy().tolist())
                         rew_entropy_buffer.extend(cur_reward_entropy_sum[new_ids][:, 0].cpu().numpy().tolist())
                         lenbuffer.extend(cur_episode_length[new_ids][:, 0].cpu().numpy().tolist())
-
-                        # 新增：根据累积命令方向分类统计
                         if len(new_ids) > 0:
                             for idx in new_ids[:, 0]:
                                 rew = cur_reward_sum[idx].item()
                                 length = cur_episode_length[idx].item()
                                 cmd_x_avg = cur_cmd_x_sum[idx].item() / max(length, 1)
-                                
-                                if cmd_x_avg > 0.05:  # 前向命令为主
+                                if cmd_x_avg > 0.05:  # forward command as main
                                     rewbuffer_forward.append(rew)
                                     lenbuffer_forward.append(length)
-                                elif cmd_x_avg < -0.05:  # 后向命令为主
+                                elif cmd_x_avg < -0.05:  # backward command
                                     rewbuffer_backward.append(rew)
                                     lenbuffer_backward.append(length)
-
                         cur_reward_sum[new_ids] = 0
                         cur_reward_explr_sum[new_ids] = 0
                         cur_reward_entropy_sum[new_ids] = 0
@@ -219,11 +216,11 @@ class OnPolicyRunner:
 
                 stop = time.time()
                 collection_time = stop - start
-
                 # Learning step
                 start = stop
                 self.alg.compute_returns(critic_obs)
             
+            ### Update ###
             (   mean_value_loss,
                 mean_surrogate_loss,
                 mean_estimator_loss,
@@ -234,7 +231,8 @@ class OnPolicyRunner:
             if hist_encoding:
                 print("Updating dagger...")
                 mean_hist_latent_loss = self.alg.update_dagger()
-            
+
+            ### Log ###
             stop = time.time()
             learn_time = stop - start
             if self.log_dir is not None:
@@ -252,7 +250,7 @@ class OnPolicyRunner:
                 if it % (5*self.save_interval) == 0:
                     self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(it)))
             ep_infos.clear()
-        
+
         # self.current_learning_iteration += num_learning_iterations
         self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(self.current_learning_iteration)))
 
@@ -304,7 +302,6 @@ class OnPolicyRunner:
             # wandb_dict['Train/mean_reward_task'] = wandb_dict['Train/mean_reward'] - wandb_dict['Train/mean_reward_explr']
             # wandb_dict['Train/mean_reward_entropy'] = statistics.mean(locs['rew_entropy_buffer'])
             wandb_dict['Train/mean_episode_length'] = statistics.mean(locs['lenbuffer'])
-            # 新增：前向和后向命令的统计
             if len(locs['rewbuffer_forward']) > 0:
                 wandb_dict['Train/forward_mean_reward'] = statistics.mean(locs['rewbuffer_forward'])
                 wandb_dict['Train/forward_mean_episode_length'] = statistics.mean(locs['lenbuffer_forward'])
@@ -335,7 +332,6 @@ class OnPolicyRunner:
                           f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n""")
                         #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
                         #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
-            # 新增：打印前向和后向统计
             if len(locs['rewbuffer_forward']) > 0:
                 log_string += f"""{'Forward mean reward:':>{pad}} {statistics.mean(locs['rewbuffer_forward']):.2f}\n"""
                 log_string += f"""{'Forward mean ep length:':>{pad}} {statistics.mean(locs['lenbuffer_forward']):.2f}\n"""
@@ -402,31 +398,32 @@ class OnPolicyRunner:
                     with torch.no_grad():
                         scandots_latent = self.alg.actor_critic.actor.infer_scandots_latent(obs)
                     scandots_latent_buffer.append(scandots_latent)
-                    scandots_buffer.append(obs[:, self.env.cfg.env.n_proprio : self.env.cfg.env.n_proprio + self.env.cfg.env.n_scan])
-                    obs_prop_depth = obs[:, :self.env.cfg.env.n_proprio].clone()
-                    obs_prop_depth[:, 6:8] = 0
-                    # depth_latent_and_yaw = self.alg.depth_encoder(infos["depth"].clone(), obs_prop_depth)  # clone is crucial to avoid in-place operation
-                    # depth_latent = depth_latent_and_yaw[:, :-2]
-                    depth_out = self.alg.depth_encoder(infos["depth"].clone(), obs_prop_depth)  # dict: {"belief","recon_extero",...}
+                    scandots_buffer.append(obs[:, self.env.cfg.env.n_rhythm+self.env.cfg.env.n_proprio : self.env.cfg.env.n_rhythm+self.env.cfg.env.n_proprio+self.env.cfg.env.n_scan])
+                    obs_prop_depth = obs[:, self.env.cfg.env.n_rhythm : self.env.cfg.env.n_rhythm+self.env.cfg.env.n_proprio].clone()
+                    obs_rt = obs[:, : self.env.cfg.env.n_rhythm]
+                    with torch.no_grad():
+                        conf_latent = self.alg.actor_critic.actor.get_hidden_state()
+                        # 如果 conf_latent 为 None（初始状态），初始化为零向量
+                        if conf_latent is None:
+                            conf_latent = torch.zeros(obs.shape[0], self.alg.actor_critic.actor.sme_latent_dim, device=self.device)
+
+                    depth_out = self.alg.depth_encoder(infos["depth"].clone(), obs_prop_depth, obs_rt, conf_latent)  # dict: {"belief","recon_extero",...}
                     depth_latent = depth_out["belief"]
                     depth_recon = depth_out["recon_extero"]
                     yaw = obs[:, 6:8]
-                    # yaw = 1.5*depth_latent_and_yaw[:, -2:]
                     
                     depth_latent_buffer.append(depth_latent)
                     recon_buffer.append(depth_recon)
                     yaw_buffer_student.append(yaw)
                     yaw_buffer_teacher.append(obs[:, 6:8])
                 
+                ### teacher
                 with torch.no_grad():
                     actions_teacher = self.alg.actor_critic.act_inference(obs, hist_encoding=True, scandots_latent=None)
                     actions_teacher_buffer.append(actions_teacher)
 
+                ### student
                 obs_student = obs.clone()
-
-                ### use origin delta yaw
-                # obs_student[:, 6:8] = yaw.detach()
-                # obs_student[infos["delta_yaw_ok"], 6:8] = yaw.detach()[infos["delta_yaw_ok"]]
                 delta_yaw_ok_buffer.append(torch.nonzero(infos["delta_yaw_ok"]).size(0) / infos["delta_yaw_ok"].numel())
                 actions_student = self.alg.depth_actor(obs_student, hist_encoding=True, scandots_latent=depth_latent)
                 actions_student_buffer.append(actions_student)

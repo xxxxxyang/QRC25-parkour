@@ -50,7 +50,7 @@ class LeggedRobotCfg(BaseConfig):
         n_rhythm = 4  # 步态相位编码维度
 
         # num_observations = n_proprio + n_scan + n_priv + n_priv_latent + history_len*n_proprio # 53 + 132 + 9 + 29 + 10*53 = 753
-        num_observations = n_proprio + n_scan + n_priv + n_priv_latent + history_len*n_proprio + n_rhythm # 53 + 132 + 9 + 29 + 10*53 + 4 =757
+        num_observations = n_proprio + n_scan + n_priv + n_priv_latent + history_len*n_proprio + n_rhythm # 53 + 132 + 9 + 29 + 10*53 + 4 = 757
         num_privileged_obs = None # if not None a priviledge_obs_buf will be returned by step() (critic obs for assymetric training). None is returned otherwise 
         num_actions = 12
         env_spacing = 3.  # not used with heightfields/trimeshes 

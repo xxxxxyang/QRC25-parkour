@@ -197,7 +197,6 @@ class PPO:
     def compute_returns(self, last_critic_obs):
         last_values= self.actor_critic.evaluate(last_critic_obs).detach()
         self.storage.compute_returns(last_values, self.gamma, self.lam)
-    
 
     def update(self):
         mean_value_loss = 0
@@ -206,89 +205,216 @@ class PPO:
         mean_discriminator_loss = 0
         mean_discriminator_acc = 0
         mean_priv_reg_loss = 0
+        orig_hidden = None
+
         if self.actor_critic.is_recurrent:
-            generator = self.storage.reccurent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
+            orig_hidden = self.actor_critic.get_hidden_states()
+            generator = self.storage.reccurent_mini_batch_generator(
+                self.num_mini_batches, self.num_learning_epochs
+            )
         else:
-            generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
-        for obs_batch, critic_obs_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, \
-            old_mu_batch, old_sigma_batch, hid_states_batch, masks_batch in generator:
+            generator = self.storage.mini_batch_generator(
+                self.num_mini_batches, self.num_learning_epochs
+            )
 
-                self.actor_critic.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0]) # match distribution dimension
+        # update over mini-batches
+        for (
+            obs_batch, critic_obs_batch, actions_batch,
+            target_values_batch, advantages_batch, returns_batch,
+            old_actions_log_prob_batch, old_mu_batch, old_sigma_batch,
+            hid_states_batch, masks_batch
+        ) in generator:
 
-                actions_log_prob_batch = self.actor_critic.get_actions_log_prob(actions_batch)
-                value_batch = self.actor_critic.evaluate(critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1])
-                mu_batch = self.actor_critic.action_mean
-                sigma_batch = self.actor_critic.action_std
-                entropy_batch = self.actor_critic.entropy
-                
-                # Adaptation module update
-                priv_latent_batch = self.actor_critic.actor.infer_priv_latent(obs_batch)
-                with torch.inference_mode():
-                    hist_latent_batch = self.actor_critic.actor.infer_hist_latent(obs_batch)
-                priv_reg_loss = (priv_latent_batch - hist_latent_batch.detach()).norm(p=2, dim=1).mean()
-                priv_reg_stage = min(max((self.counter - self.priv_reg_coef_schedual[2]), 0) / self.priv_reg_coef_schedual[3], 1)
-                priv_reg_coef = priv_reg_stage * (self.priv_reg_coef_schedual[1] - self.priv_reg_coef_schedual[0]) + self.priv_reg_coef_schedual[0]
+            if self.actor_critic.is_recurrent:
+                # === RECURRENT PATH ===
+                # obs_batch: (T, B, F), masks_batch: (T, B) or (T, B, 1)
+                # masks_batch: 1 = valid data, 0 = padding
 
-                # Estimator
-                priv_states_predicted = self.estimator(obs_batch[:, :self.num_prop])  # obs in batch is with true priv_states
-                estimator_loss = (priv_states_predicted - obs_batch[:, self.num_prop+self.num_scan:self.num_prop+self.num_scan+self.priv_states_dim]).pow(2).mean()
-                self.estimator_optimizer.zero_grad()
-                estimator_loss.backward()
-                nn.utils.clip_grad_norm_(self.estimator.parameters(), self.max_grad_norm)
-                self.estimator_optimizer.step()
-                
-                # KL
-                if self.desired_kl != None and self.schedule == 'adaptive':
-                    with torch.inference_mode():
-                        kl = torch.sum(
-                            torch.log(sigma_batch / old_sigma_batch + 1.e-5) + (torch.square(old_sigma_batch) + torch.square(old_mu_batch - mu_batch)) / (2.0 * torch.square(sigma_batch)) - 0.5, axis=-1)
-                        kl_mean = torch.mean(kl)
-
-                        if kl_mean > self.desired_kl * 2.0:
-                            self.learning_rate = max(1e-5, self.learning_rate / 1.5)
-                        elif kl_mean < self.desired_kl / 2.0 and kl_mean > 0.0:
-                            self.learning_rate = min(1e-2, self.learning_rate * 1.5)
-                        
-                        for param_group in self.optimizer.param_groups:
-                            param_group['lr'] = self.learning_rate
-
-
-                # Surrogate loss
-                ratio = torch.exp(actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch))
-                surrogate = -torch.squeeze(advantages_batch) * ratio
-                surrogate_clipped = -torch.squeeze(advantages_batch) * torch.clamp(ratio, 1.0 - self.clip_param,
-                                                                                1.0 + self.clip_param)
-                surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
-
-                # Value function loss
-                if self.use_clipped_value_loss:
-                    value_clipped = target_values_batch + (value_batch - target_values_batch).clamp(-self.clip_param,
-                                                                                                    self.clip_param)
-                    value_losses = (value_batch - returns_batch).pow(2)
-                    value_losses_clipped = (value_clipped - returns_batch).pow(2)
-                    value_loss = torch.max(value_losses, value_losses_clipped).mean()
+                # init hidden state
+                hid_a, hid_c = hid_states_batch
+                if hid_a is not None:
+                    if hid_a.dim() == 3 and hid_a.size(0) == 1:
+                        hid_a = hid_a.squeeze(0)
+                    self.actor_critic.actor.hidden_state = hid_a
                 else:
-                    value_loss = (returns_batch - value_batch).pow(2).mean()
+                    self.actor_critic.actor.hidden_state = None
 
-                loss = surrogate_loss + \
-                       self.value_loss_coef * value_loss - \
-                       self.entropy_coef * entropy_batch.mean() + \
-                       priv_reg_coef * priv_reg_loss
-                # loss = self.teacher_alpha * imitation_loss + (1 - self.teacher_alpha) * loss
+                T, B, F = obs_batch.shape
 
-                # Gradient step
-                self.optimizer.zero_grad()
-                loss.backward()
-                nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
-                self.optimizer.step()
+                log_probs_list = []
+                entropies_list = []
+                values_list = []
+                mus_list = []
 
-                mean_value_loss += value_loss.item()
-                mean_surrogate_loss += surrogate_loss.item()
-                mean_estimator_loss += estimator_loss.item()
-                mean_priv_reg_loss += priv_reg_loss.item()
-                mean_discriminator_loss += 0
-                mean_discriminator_acc += 0
+                for t in range(T):
+                    # forward actor
+                    mu_t = self.actor_critic.actor(obs_batch[t], hist_encoding=False)
+                    std = self.actor_critic.std
+                    dist = torch.distributions.Normal(mu_t, std)
 
+                    log_prob_t = dist.log_prob(actions_batch[t]).sum(dim=-1)  # (B,)
+                    entropy_t = dist.entropy().sum(dim=-1)  # (B,)
+
+                    # forward critic
+                    value_t = self.actor_critic.critic(critic_obs_batch[t]).squeeze(-1)  # (B,)
+
+                    log_probs_list.append(log_prob_t)
+                    entropies_list.append(entropy_t)
+                    values_list.append(value_t)
+                    mus_list.append(mu_t)
+
+                # stack: (T, B) or (T, B, A)
+                actions_log_prob_batch_new = torch.stack(log_probs_list, dim=0)  # (T, B)
+                entropy_batch = torch.stack(entropies_list, dim=0)  # (T, B)
+                value_batch = torch.stack(values_list, dim=0)  # (T, B)
+                mu_batch = torch.stack(mus_list, dim=0)  # (T, B, A)
+                sigma_batch = self.actor_critic.std.expand_as(mu_batch)
+
+                # masks for loss computation
+                # masks_batch: (T, B) or (T, B, 1), 1=valid, 0=padding
+                if masks_batch is not None:
+                    masks_flat = masks_batch.reshape(-1).float()  # (T*B,)
+                    valid_count = masks_flat.sum().clamp(min=1)
+                else:
+                    masks_flat = torch.ones(T * B, device=obs_batch.device)
+                    valid_count = T * B
+
+                # flatten for loss
+                old_actions_log_prob_flat = old_actions_log_prob_batch.reshape(-1)  # (T*B,)
+                advantages_flat = advantages_batch.reshape(-1)  # (T*B,)
+                returns_flat = returns_batch.reshape(-1)  # (T*B,)
+                target_values_flat = target_values_batch.reshape(-1)  # (T*B,)
+                old_mu_flat = old_mu_batch.reshape(-1, old_mu_batch.shape[-1])  # (T*B, A)
+                old_sigma_flat = old_sigma_batch.reshape(-1, old_sigma_batch.shape[-1])  # (T*B, A)
+
+                actions_log_prob_flat = actions_log_prob_batch_new.reshape(-1)  # (T*B,)
+                entropy_flat = entropy_batch.reshape(-1)  # (T*B,)
+                value_flat = value_batch.reshape(-1)  # (T*B,)
+                mu_flat = mu_batch.reshape(-1, mu_batch.shape[-1])  # (T*B, A)
+                sigma_flat = sigma_batch.reshape(-1, sigma_batch.shape[-1])  # (T*B, A)
+
+                # for priv_reg
+                obs_flat = obs_batch.reshape(-1, F)  # (T*B, F)
+
+            else:
+                # === NON-RECURRENT PATH ===
+                # obs_batch: (B, F), no time dimension
+
+                # forward actor
+                mu_batch = self.actor_critic.actor(obs_batch, hist_encoding=False)
+                std = self.actor_critic.std
+                dist = torch.distributions.Normal(mu_batch, std)
+
+                actions_log_prob_flat = dist.log_prob(actions_batch).sum(dim=-1)  # (B,)
+                entropy_flat = dist.entropy().sum(dim=-1)  # (B,)
+
+                # forward critic
+                value_flat = self.actor_critic.critic(critic_obs_batch).squeeze(-1)  # (B,)
+
+                mu_flat = mu_batch
+                sigma_flat = std.expand_as(mu_batch)
+
+                # flatten references (already flat for non-recurrent)
+                old_actions_log_prob_flat = old_actions_log_prob_batch.reshape(-1)
+                advantages_flat = advantages_batch.reshape(-1)
+                returns_flat = returns_batch.reshape(-1)
+                target_values_flat = target_values_batch.reshape(-1)
+                old_mu_flat = old_mu_batch
+                old_sigma_flat = old_sigma_batch
+
+                obs_flat = obs_batch
+                masks_flat = torch.ones(obs_batch.shape[0], device=obs_batch.device)
+                valid_count = obs_batch.shape[0]
+
+            # PPO Surrogate Loss
+            ratio = torch.exp(actions_log_prob_flat - old_actions_log_prob_flat)
+            surr1 = ratio * advantages_flat
+            surr2 = torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param) * advantages_flat
+            surrogate_loss = -torch.sum(torch.min(surr1, surr2) * masks_flat) / valid_count
+
+            # Value Loss
+            if self.use_clipped_value_loss:
+                value_clipped = target_values_flat + (value_flat - target_values_flat).clamp(
+                    -self.clip_param, self.clip_param
+                )
+                value_losses = (value_flat - returns_flat).pow(2)
+                value_losses_clipped = (value_clipped - returns_flat).pow(2)
+                value_loss = torch.sum(torch.max(value_losses, value_losses_clipped) * masks_flat) / valid_count
+            else:
+                value_loss = torch.sum((value_flat - returns_flat).pow(2) * masks_flat) / valid_count
+
+            # Entropy Loss
+            entropy_loss = -torch.sum(entropy_flat * masks_flat) / valid_count
+
+            # Priv Reg Loss (Adaptation)
+            valid_mask = masks_flat > 0
+            obs_valid = obs_flat[valid_mask]
+
+            priv_latent_batch = self.actor_critic.actor.infer_priv_latent(obs_valid)
+            with torch.inference_mode():
+                hist_latent_batch = self.actor_critic.actor.infer_hist_latent(obs_valid)
+            priv_reg_loss = (priv_latent_batch - hist_latent_batch.detach()).norm(p=2, dim=1).mean()
+
+            priv_reg_stage = min(
+                max((self.counter - self.priv_reg_coef_schedual[2]), 0) / self.priv_reg_coef_schedual[3], 1
+            )
+            priv_reg_coef = (
+                priv_reg_stage * (self.priv_reg_coef_schedual[1] - self.priv_reg_coef_schedual[0])
+                + self.priv_reg_coef_schedual[0]
+            )
+
+            # Estimator Loss
+            priv_states_predicted = self.estimator(obs_valid[:, :self.num_prop])
+            gt_priv = obs_valid[
+                :, self.num_prop + self.num_scan : self.num_prop + self.num_scan + self.priv_states_dim
+            ]
+            estimator_loss = (priv_states_predicted - gt_priv).pow(2).mean()
+
+            self.estimator_optimizer.zero_grad()
+            estimator_loss.backward()
+            nn.utils.clip_grad_norm_(self.estimator.parameters(), self.max_grad_norm)
+            self.estimator_optimizer.step()
+
+            # KL Adaptive Learning Rate
+            if self.desired_kl is not None and self.schedule == 'adaptive':
+                with torch.inference_mode():
+                    kl = (
+                        torch.log(sigma_flat / old_sigma_flat + 1e-5)
+                        + (old_sigma_flat.pow(2) + (old_mu_flat - mu_flat).pow(2)) / (2.0 * sigma_flat.pow(2))
+                        - 0.5
+                    ).sum(dim=-1)
+                    kl_mean = torch.sum(kl * masks_flat) / valid_count
+
+                    if kl_mean > self.desired_kl * 2.0:
+                        self.learning_rate = max(1e-5, self.learning_rate / 1.5)
+                    elif kl_mean < self.desired_kl / 2.0 and kl_mean > 0:
+                        self.learning_rate = min(1e-2, self.learning_rate * 1.5)
+
+                    for pg in self.optimizer.param_groups:
+                        pg['lr'] = self.learning_rate
+
+            # Total Loss & Backward
+            loss = (
+                surrogate_loss
+                + self.value_loss_coef * value_loss
+                + self.entropy_coef * entropy_loss
+                + priv_reg_coef * priv_reg_loss
+            )
+
+            self.optimizer.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
+            self.optimizer.step()
+
+            # Accumulate metrics
+            mean_value_loss += value_loss.item()
+            mean_surrogate_loss += surrogate_loss.item()
+            mean_estimator_loss += estimator_loss.item()
+            mean_priv_reg_loss += priv_reg_loss.item()
+            mean_discriminator_loss += 0
+            mean_discriminator_acc += 0
+
+        # Finalize
         num_updates = self.num_learning_epochs * self.num_mini_batches
         mean_value_loss /= num_updates
         mean_surrogate_loss /= num_updates
@@ -296,34 +422,117 @@ class PPO:
         mean_priv_reg_loss /= num_updates
         mean_discriminator_loss /= num_updates
         mean_discriminator_acc /= num_updates
+
+        # Restore original hidden state
+        if self.actor_critic.is_recurrent:
+            if orig_hidden is None or orig_hidden == (None, None):
+                self.actor_critic.actor.hidden_state = None
+            else:
+                hid = orig_hidden[0]  # orig_hidden is (h_actor, h_critic)
+                if hid is None:
+                    self.actor_critic.actor.hidden_state = None
+                elif hid.dim() == 3 and hid.size(0) == 1:
+                    self.actor_critic.actor.hidden_state = hid.squeeze(0)  # (1,B,H) -> (B,H)
+                else:
+                    self.actor_critic.actor.hidden_state = hid  # already (B,H)
         self.storage.clear()
         self.update_counter()
-        return mean_value_loss, mean_surrogate_loss, mean_estimator_loss, mean_discriminator_loss, mean_discriminator_acc, mean_priv_reg_loss, priv_reg_coef
+
+        return (
+            mean_value_loss,
+            mean_surrogate_loss,
+            mean_estimator_loss,
+            mean_discriminator_loss,
+            mean_discriminator_acc,
+            mean_priv_reg_loss,
+            priv_reg_coef,
+        )
 
     def update_dagger(self):
         mean_hist_latent_loss = 0
-        if self.actor_critic.is_recurrent:
-            generator = self.storage.reccurent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
-        else:
-            generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
-        for obs_batch, critic_obs_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, \
-            old_mu_batch, old_sigma_batch, hid_states_batch, masks_batch in generator:
-                with torch.inference_mode():
-                    self.actor_critic.act(obs_batch, hist_encoding=True, masks=masks_batch, hidden_states=hid_states_batch[0])
+        orig_hidden = None
 
-                # Adaptation module update
-                with torch.inference_mode():
-                    priv_latent_batch = self.actor_critic.actor.infer_priv_latent(obs_batch)
-                hist_latent_batch = self.actor_critic.actor.infer_hist_latent(obs_batch)
-                hist_latent_loss = (priv_latent_batch.detach() - hist_latent_batch).norm(p=2, dim=1).mean()
-                self.hist_encoder_optimizer.zero_grad()
-                hist_latent_loss.backward()
-                nn.utils.clip_grad_norm_(self.actor_critic.actor.history_encoder.parameters(), self.max_grad_norm)
-                self.hist_encoder_optimizer.step()
+        if self.actor_critic.is_recurrent:
+            orig_hidden = self.actor_critic.get_hidden_states()
+            generator = self.storage.reccurent_mini_batch_generator(
+                self.num_mini_batches, self.num_learning_epochs
+            )
+        else:
+            generator = self.storage.mini_batch_generator(
+                self.num_mini_batches, self.num_learning_epochs
+            )
+
+        # update over mini-batches
+        for (
+            obs_batch, critic_obs_batch, actions_batch,
+            target_values_batch, advantages_batch, returns_batch,
+            old_actions_log_prob_batch, old_mu_batch, old_sigma_batch,
+            hid_states_batch, masks_batch
+        ) in generator:
+
+            if self.actor_critic.is_recurrent:
+                # === RECURRENT PATH ===
+                # obs_batch: (T, B, F), masks_batch: (T, B) or (T, B, 1)
+                # masks_batch: 1 = valid, 0 = padding
                 
-                mean_hist_latent_loss += hist_latent_loss.item()
+                hid_a, hid_c = hid_states_batch
+                if hid_a is not None:
+                    if hid_a.dim() == 3 and hid_a.size(0) == 1:
+                        hid_a = hid_a.squeeze(0)
+                    self.actor_critic.actor.hidden_state = hid_a
+                else:
+                    self.actor_critic.actor.hidden_state = None
+                
+                T, B, F = obs_batch.shape
+
+                with torch.inference_mode():
+                    for t in range(T):
+                        _ = self.actor_critic.actor(obs_batch[t], hist_encoding=True)
+                
+                # flatten obs for latent inference
+                if masks_batch is not None:
+                    masks_flat = masks_batch.reshape(-1).float()
+                    valid_mask = masks_flat > 0
+                else:
+                    valid_mask = torch.ones(T * B, dtype=torch.bool, device=obs_batch.device)
+                
+                obs_flat = obs_batch.reshape(-1, F)
+                obs_valid = obs_flat[valid_mask]
+            else:
+                # === NON-RECURRENT PATH ===
+                # obs_batch: (B, F)
+                obs_valid = obs_batch
+            
+            # Adaptation module update (hist_encoder distillation)
+            with torch.inference_mode():
+                priv_latent_batch = self.actor_critic.actor.infer_priv_latent(obs_valid)
+            hist_latent_batch = self.actor_critic.actor.infer_hist_latent(obs_valid)
+            hist_latent_loss = (priv_latent_batch.detach() - hist_latent_batch).norm(p=2, dim=1).mean()
+            
+            self.hist_encoder_optimizer.zero_grad()
+            hist_latent_loss.backward()
+            nn.utils.clip_grad_norm_(self.actor_critic.actor.history_encoder.parameters(), self.max_grad_norm)
+            self.hist_encoder_optimizer.step()
+            
+            mean_hist_latent_loss += hist_latent_loss.item()
+
+        # Finalize
         num_updates = self.num_learning_epochs * self.num_mini_batches
         mean_hist_latent_loss /= num_updates
+        
+        # Restore original hidden state
+        if self.actor_critic.is_recurrent:
+            if orig_hidden is None or orig_hidden == (None, None):
+                self.actor_critic.actor.hidden_state = None
+            else:
+                hid = orig_hidden[0]  # orig_hidden is (h_actor, h_critic)
+                if hid is None:
+                    self.actor_critic.actor.hidden_state = None
+                elif hid.dim() == 3 and hid.size(0) == 1:
+                    self.actor_critic.actor.hidden_state = hid.squeeze(0)
+                else:
+                    self.actor_critic.actor.hidden_state = hid
+
         self.storage.clear()
         self.update_counter()
         return mean_hist_latent_loss
