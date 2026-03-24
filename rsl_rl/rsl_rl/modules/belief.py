@@ -115,9 +115,21 @@ class GatedRecurrentBelief(nn.Module):
             "raw_extero": extero_latent
         }
 
-    def reset(self):
-        """Reset RNN hidden states (call at episode start)."""
-        self.hidden_states = None
+    def reset_hidden(self, dones=None):
+        """Reset hidden states for terminated episodes (per-env).
+        Args:
+            dones: bool/float tensor, shape (B,) or (B, 1)
+                   True/1.0 = episode terminated, need to reset
+        """
+        if self.hidden_states is None or dones is None:
+            return
+        if dones.dim() > 1:
+            dones = dones.squeeze(-1)
+        dones = dones.to(torch.bool)
+        # GRU hidden: (num_layers, B, hidden_dim), typically (1, B, H)
+        mask = (~dones).float().view(1, -1, 1)
+        self.hidden_states = self.hidden_states * mask
+        # self.hidden_states = self.hidden_states.detach()
 
     def detach_hidden_states(self):
         """Detach hidden states to avoid backprop through entire episode."""

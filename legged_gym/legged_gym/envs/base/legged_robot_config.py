@@ -214,43 +214,57 @@ class LeggedRobotCfg(BaseConfig):
         num_goals = 8
 
     class commands:
-        curriculum = True
+        curriculum = False
         max_curriculum = 1.
-        num_commands = 4 # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
-        resampling_time = 10. # time before command are changed[s]
-        heading_resampling_time = 4*resampling_time # 如果使用heading_command, yaw command 的更新间隔 [s]
-        heading_command = False # use command to calculate target yaw
+        num_commands = 4
+        resampling_time = 10.
+        heading_command = False
 
-        tracking_avg_alpha = 0.05
-        ang_vel_enable_threshold = 0.6
-        ang_vel_disable_threshold = 0.3
+        # clip / dead zone
+        # lin_vel_clip = 0.1
+        # ang_vel_clip = 0.1  # 保留字段但不再用于commands[:,2]采样
+        # min_ratio = 0.3
+        goal_vel_min  = 0.5        # parkour地形最小速度
+        goal_vel_max  = 1.5        # parkour地形最大速度（也作no_goal地形上限）
+        lin_vel_x_max = 1.5        # flat地形最大速度（双向）
+        lin_vel_clip  = 0.1        # 零速dead zone
 
-        # min command scale clip
-        lin_vel_clip = 0.1 # [m/s]
-        ang_vel_clip = 0.05 # [rad]
+        # # goal-based参数
+        # goal_x_ratio = 1.0
+        # goal_y_ratio = 0.0
+        # goal_cmd_smooth_alpha = 0.08
+        # x_stop_by_yaw_threshold = 0.8
+        # goal_min_vx_ratio = 0.3         # [NEW] 转向时保留的最小前进速度比例
 
-        min_ratio = 0.5
-        initial_dead_zone = {
-            "lin_vel_x": 0.3,
-            "lin_vel_y": 0.0,
-            "ang_vel_z": 0.0
-        }
-        # Easy ranges
+        # # [NEW] 无goal地形fake target的delta_yaw采样范围
+        # heading_error_range = [-1.57, 1.57]  # [-π/2, π/2]，可以设到[-π, π]更激进
+
+        # # [REMOVED] ang_vel_enable/disable_threshold, tracking_avg_alpha
+        # # 这两个只在旧的wz-curriculum逻辑里用，现在不需要了
+
+        # # lazy_stop里用到的角速度增益
+        # lazy_stop_wz_kp = 1.0           # [NEW]
+
+        # initial_dead_zone = {
+        #     "lin_vel_x": 0.3,
+        #     "lin_vel_y": 0.0,
+        #     "ang_vel_z": 0.0,   # ang_vel_z dead zone保留字段，值设0（不影响delta_yaw）
+        # }
+
         class ranges:
-            lin_vel_x = [0., 1.5] # min max [m/s]
-            lin_vel_y = [0.0, 0.0]   # min max [m/s]
-            ang_vel_z = [0, 0]    # min max [rad]
+            lin_vel_x = [0., 1.5]
+            lin_vel_y = [0.0, 0.0]
+            ang_vel_z = [0, 0]      # 保留字段，实际不再用于采样commands[:,2]
 
-        # Hard ranges
         class max_ranges:
-            lin_vel_x = [-1.0, 1.8] # min max [m/s]
-            lin_vel_y = [-0.3, 0.3]#[0.15, 0.6]   # min max [m/s]
-            ang_vel_z = [-1., 1.]    # min max [rad]
+            lin_vel_x = [-1.0, 1.8]
+            lin_vel_y = [-0.3, 0.3]
+            ang_vel_z = [-1., 1.]   # 保留字段，lazy_stop_wz_kp用到这个范围做clip
 
         class crclm_incremnt:
-            lin_vel_x = 0.1 # min max [m/s]
-            lin_vel_y = 0.1  # min max [m/s]
-            ang_vel_z = 0.1    # min max [rad]
+            lin_vel_x = 0.1
+            lin_vel_y = 0.1
+            ang_vel_z = 0.1
 
         waypoint_delta = 0.7
 
@@ -317,48 +331,46 @@ class LeggedRobotCfg(BaseConfig):
         
     class rewards:
         class scales:
-            # tracking rewards
-            # tracking_goal_vel = 1.5
-            # tracking_yaw = 0.5
-            tracking_lin_vel = 1.5
-            tracking_lin_vel_forward = 3.0   # 前向权重更高
-            tracking_lin_vel_backward = 1.5  # 后向权重较低
-            tracking_ang_vel_z = 0.5
-            # regularization rewards
+            # [CHANGED] 主跟踪奖励改为投影速度
+            tracking_goal_vel = 1.5   # [NEW PRIMARY] 替代tracking_lin_vel
+            tracking_lin_vel = 0.0              # 关掉，用projected代替
+            tracking_lin_vel_forward = 0.0
+            tracking_lin_vel_backward = 0.0
+            tracking_ang_vel_z = 0.0            # [CHANGED] 现在是delta_yaw->0的奖励，父类默认关掉
+                                                # 子类可以选择性开启
+            # regularization
             lin_vel_z = -1.0
-            ang_vel_xy = -0.05
+            ang_vel_xy = -0.0
             orientation = -1.
-            roll_orientation = -0.5
-            pitch_orientation = -0.
+            roll_orientation = -0.
+            pitch_orientation = 0.
             dof_acc = -2.5e-7
-            collision = -10.
+            collision = -1.
             action_rate = -0.1
             delta_torques = -1.0e-7
             torques = -0.00001
             hip_pos = -0.5
             dof_error = -0.04
-            feet_stumble = -1
-            feet_edge = -1
+            feet_stumble = -1.
+            feet_edge = -1.
             feet_phase = -1.0
             feet_contact_balance = -0.5
             lazy_stop = -0.5
             stand_still = -0.5
-            termination = -0.0
-            
-        only_positive_rewards = True # if true negative total rewards are clipped at zero (avoids early termination problems)
-        tracking_sigma = 0.1 # tracking reward = exp(-error^2/sigma)
-        soft_dof_pos_limit = 1. # percentage of urdf limits, values above this limit are penalized
-        soft_dof_vel_limit = 1
+            termination = 0.
+            feet_air_time = 0.
+            base_height = 0.
+    
+        only_positive_rewards = True
+        tracking_sigma = 0.1
+        soft_dof_pos_limit = 1.
+        soft_dof_vel_limit = 1.
         soft_torque_limit = 0.4
         base_height_target = 1.
-        max_contact_force = 40. # forces above this value are penalized
-
-        min_cycle_time = 0.5 # minimum time between gait cycles [s]
+        max_contact_force = 40.
+        min_cycle_time = 0.5
         stance_ratio_at_low_speed = 0.7
         stance_ratio_at_high_speed = 0.4
-
-
-
 
 
     # viewer camera:

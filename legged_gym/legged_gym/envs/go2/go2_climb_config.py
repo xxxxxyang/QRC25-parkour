@@ -51,6 +51,10 @@ class Go2ClimbCfg( LeggedRobotCfg ):
             'RR_calf_joint': -1.5,    # [rad]
         }
 
+    class env( LeggedRobotCfg.env ):
+        num_envs = 4096
+        # num_envs = 6144
+
     class control( LeggedRobotCfg.control ):
         # PD Drive parameters:
         control_type = 'P'
@@ -67,39 +71,46 @@ class Go2ClimbCfg( LeggedRobotCfg ):
         terminate_after_contacts_on = ["base"]#, "thigh", "calf"]
         self_collisions = 1 # 1 to disable, 0 to enable...bitwise filter
   
-    class rewards( LeggedRobotCfg.rewards ):
+    class rewards(LeggedRobotCfg.rewards):
         soft_dof_pos_limit = 0.9
         base_height_target = 0.25
-        class scales( LeggedRobotCfg.rewards.scales ):
-            tracking_lin_vel = 0.
-            # tracking_goal_vel = 1.5
-            stand_still = -0.1
-            orientation = -1.5
+        min_cycle_time = 0.7
+        only_positive_rewards = True
 
-    class commands( LeggedRobotCfg.commands ):
-        heading_command = False
-        curriculum = False
-        class max_ranges( LeggedRobotCfg.commands.max_ranges ):
-            lin_vel_x = [0.3, 0.8]  # [m/s]
-            # lin_vel_x = [0.0, 1.2]  # [m/s]
-            lin_vel_y = [0.0, 0.0]  # [m/s]
+        class scales(LeggedRobotCfg.rewards.scales):
+            # ===== 任务奖励 =====
+            tracking_goal_vel = 2.5   # [NEW PRIMARY] 核心：速度投影到goal方向
+            tracking_ang_vel_z = 0.3            # [OPTIONAL] 辅助朝向对齐（delta_yaw->0）
+                                                # 小权重，不要压过投影奖励
+            tracking_lin_vel = 0.0              # 关掉
+            tracking_lin_vel_forward = 0.0
+            tracking_lin_vel_backward = 0.0
 
-    class depth( LeggedRobotCfg.depth ):
-        # position = [0.32, 0.0, 0.035]  # front camera
-        position = dict(
-            mean = [0.32, 0.0, 0.035],
-            std = [0.01, 0.01, 0.01]
-        )
-        rotation = dict(
-            lower = [-0.1, -0.1, -0.1],
-            upper = [0.1, 0.1, 0.1]
-        )
-        # angle = [-5.7, 5.7]  # positive pitch down
+            # ===== 步态 =====
+            feet_air_time = 1.5
 
-        horizontal_fov = [85, 89]
-        near_plane = 0.1
+            # ===== 姿态 =====
+            base_height = -0.
+            orientation = -0.5
+
+            # ===== 正则化 =====
+            action_rate = -0.01
+            torques = -2e-6
+            lazy_stop = -0.2        # 保留，防止命令有速度时机器人不动
+            collision = -2.
+            dof_acc = -5e-8
+ 
+            stand_still = -1.
+            feet_phase = 0.
+            feet_contact_balance = 0.
 
     class terrain( LeggedRobotCfg.terrain ):
+        add_terrain_border = True
+        border_type = 'wall'
+        curriculum = True 
+        # more rough
+        downsampled_scale = 0.06
+        height = [0.02, 0.12]
         terrain_dict = {"smooth slope": 0., 
                         "rough slope up": 0.,
                         "rough slope down": 0.,
@@ -116,11 +127,45 @@ class Go2ClimbCfg( LeggedRobotCfg ):
                         "large stairs down": 0.,
                         "parkour": 0.,
                         "parkour_hurdle": 0.,
-                        "parkour_flat": 0.2,
-                        "parkour_step": 0.8,
-                        "parkour_gap": 0.,
+                        "parkour_flat": 0.3,
+                        "parkour_step": 0.4,
+                        "parkour_gap": 0.3,
                         "demo": 0.,}
         terrain_proportions = list(terrain_dict.values())
+        num_rows = 10
+        num_cols = 20
+
+    class commands(LeggedRobotCfg.commands):
+        curriculum = False
+        # lin_vel_clip = 0.2 + 1e-7
+        # ang_vel_clip = 0.2 + 1e-7      # 保留字段，不影响delta_yaw逻辑
+        # min_ratio = 0.5
+
+        # goal-based参数
+        goal_vel_min  = 0.3        # parkour地形最小速度
+        goal_vel_max  = 1.2        # parkour地形最大速度（也作no_goal地形上限）
+        lin_vel_x_max = 1.5        # flat地形最大速度（双向）
+        lin_vel_clip  = 0.1        # 零速dead zone
+
+        class max_ranges(LeggedRobotCfg.commands.max_ranges):
+            lin_vel_x = [-1.5, 1.8]
+            lin_vel_y = [-0.0, 0.0]
+            ang_vel_z = [-1., 1.]       # 保留，lazy_stop clip用
+
+    class depth( LeggedRobotCfg.depth ):
+        # position = [0.32, 0.0, 0.035]  # front camera
+        position = dict(
+            mean = [0.32, 0.0, 0.035],
+            std = [0.01, 0.01, 0.01]
+        )
+        rotation = dict(
+            lower = [-0.1, -0.1, -0.1],
+            upper = [0.1, 0.1, 0.1]
+        )
+        # angle = [-5.7, 5.7]  # positive pitch down
+
+        horizontal_fov = [85, 89]
+        near_plane = 0.1
 
     class domain_rand( LeggedRobotCfg.domain_rand ):
         randomize_friction = True

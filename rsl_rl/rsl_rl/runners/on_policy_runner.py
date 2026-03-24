@@ -147,6 +147,7 @@ class OnPolicyRunner:
         self.alg.actor_critic.train() # switch to train mode (for dropout for example)
 
         ep_infos = []
+        ep_rew_infos = []
         rewbuffer = deque(maxlen=100)
         rew_explr_buffer = deque(maxlen=100)
         rew_entropy_buffer = deque(maxlen=100)
@@ -186,8 +187,22 @@ class OnPolicyRunner:
 
                     ## Book keeping
                     if self.log_dir is not None:
+                        # ####### temp debug info logging, can be removed later #######
+                        # if "debug_env0" in infos and (self.tot_timesteps + i) % 10 == 0:
+                        #     d = infos["debug_env0"]
+                        #     wandb.log({
+                        #         "debug_env0/dist_to_goal": d["dist_to_goal"],
+                        #         "debug_env0/cmd_vx": d["cmd_vx"],
+                        #         "debug_env0/delta_yaw": d["delta_yaw"],
+                        #         "debug_env0/actual_vx": d["actual_vx"],
+                        #         "debug_env0/actual_wz": d["actual_wz"],
+                        #         "debug_env0/cur_goal_idx": d["cur_goal_idx"],
+                        #     }, step=self.env.global_counter)
+                        # ###############################################################
                         if 'episode' in infos:
                             ep_infos.append(infos['episode'])
+                        if 'episode_rew' in infos:
+                            ep_rew_infos.append(infos['episode_rew'])
                         cur_reward_sum += total_rew
                         cur_reward_explr_sum += 0
                         cur_reward_entropy_sum += 0
@@ -250,6 +265,7 @@ class OnPolicyRunner:
                 if it % (5*self.save_interval) == 0:
                     self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(it)))
             ep_infos.clear()
+            ep_rew_infos.clear()
 
         # self.current_learning_iteration += num_learning_iterations
         self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(self.current_learning_iteration)))
@@ -272,12 +288,24 @@ class OnPolicyRunner:
                         ep_info[key] = ep_info[key].unsqueeze(0)
                     infotensor = torch.cat((infotensor, ep_info[key].to(self.device)))
                 value = torch.mean(infotensor)
+                wandb_dict['Episode/' + key] = value
+                ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
+        if locs.get('ep_rew_infos'):
+            for key in locs['ep_rew_infos'][0]:
+                infotensor = torch.tensor([], device=self.device)
+                for ep_info in locs['ep_rew_infos']:
+                    if not isinstance(ep_info[key], torch.Tensor):
+                        ep_info[key] = torch.Tensor([ep_info[key]])
+                    if len(ep_info[key].shape) == 0:
+                        ep_info[key] = ep_info[key].unsqueeze(0)
+                    infotensor = torch.cat((infotensor, ep_info[key].to(self.device)))
+                value = torch.mean(infotensor)
                 wandb_dict['Episode_rew/' + key] = value
                 ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
         mean_std = self.alg.actor_critic.std.mean()
         fps = int(self.num_steps_per_env * self.env.num_envs / (locs['collection_time'] + locs['learn_time']))
 
-        wandb_dict['Loss/value_function'] = ['mean_value_loss']
+        wandb_dict['Loss/value_function'] = locs['mean_value_loss']
         wandb_dict['Loss/surrogate'] = locs['mean_surrogate_loss']
         wandb_dict['Loss/estimator'] = locs['mean_estimator_loss']
         wandb_dict['Loss/hist_latent_loss'] = locs['mean_hist_latent_loss']
@@ -302,12 +330,12 @@ class OnPolicyRunner:
             # wandb_dict['Train/mean_reward_task'] = wandb_dict['Train/mean_reward'] - wandb_dict['Train/mean_reward_explr']
             # wandb_dict['Train/mean_reward_entropy'] = statistics.mean(locs['rew_entropy_buffer'])
             wandb_dict['Train/mean_episode_length'] = statistics.mean(locs['lenbuffer'])
-            if len(locs['rewbuffer_forward']) > 0:
-                wandb_dict['Train/forward_mean_reward'] = statistics.mean(locs['rewbuffer_forward'])
-                wandb_dict['Train/forward_mean_episode_length'] = statistics.mean(locs['lenbuffer_forward'])
-            if len(locs['rewbuffer_backward']) > 0:
-                wandb_dict['Train/backward_mean_reward'] = statistics.mean(locs['rewbuffer_backward'])
-                wandb_dict['Train/backward_mean_episode_length'] = statistics.mean(locs['lenbuffer_backward'])
+            # if len(locs['rewbuffer_forward']) > 0:
+            #     wandb_dict['Train/forward_mean_reward'] = statistics.mean(locs['rewbuffer_forward'])
+            #     wandb_dict['Train/forward_mean_episode_length'] = statistics.mean(locs['lenbuffer_forward'])
+            # if len(locs['rewbuffer_backward']) > 0:
+            #     wandb_dict['Train/backward_mean_reward'] = statistics.mean(locs['rewbuffer_backward'])
+            #     wandb_dict['Train/backward_mean_episode_length'] = statistics.mean(locs['lenbuffer_backward'])
             # wandb_dict['Train/mean_reward/time', statistics.mean(locs['rewbuffer']), self.tot_time)
             # wandb_dict['Train/mean_episode_length/time', statistics.mean(locs['lenbuffer']), self.tot_time)
 
@@ -402,7 +430,7 @@ class OnPolicyRunner:
                     obs_prop_depth = obs[:, self.env.cfg.env.n_rhythm : self.env.cfg.env.n_rhythm+self.env.cfg.env.n_proprio].clone()
                     obs_rt = obs[:, : self.env.cfg.env.n_rhythm]
                     with torch.no_grad():
-                        conf_latent = self.alg.actor_critic.actor.get_hidden_state()
+                        conf_latent = self.alg.depth_actor.get_hidden_states()
                         # 如果 conf_latent 为 None（初始状态），初始化为零向量
                         if conf_latent is None:
                             conf_latent = torch.zeros(obs.shape[0], self.alg.actor_critic.actor.sme_latent_dim, device=self.device)
@@ -435,6 +463,13 @@ class OnPolicyRunner:
                     obs, privileged_obs, rewards, dones, infos = self.env.step(actions_student.detach())  # obs has changed to next_obs !! if done obs has been reset
                 critic_obs = privileged_obs if privileged_obs is not None else obs
                 obs, critic_obs, rewards, dones = obs.to(self.device), critic_obs.to(self.device), rewards.to(self.device), dones.to(self.device)
+
+                # ========== Reset hidden states for done environments ==========
+                if dones.any():
+                    self.alg.depth_encoder.reset_hidden(dones)
+                    self.alg.depth_encoder.detach_hidden_states()
+                    self.alg.depth_actor.reset_hidden(dones)
+                # ===============================================================
 
                 if self.log_dir is not None:
                         # Book keeping
@@ -487,6 +522,7 @@ class OnPolicyRunner:
             learn_time = stop - start
 
             self.alg.depth_encoder.detach_hidden_states()
+            self.alg.depth_actor.detach_hidden_states()
 
             if self.log_dir is not None:
                 self.log_vision(locals())
