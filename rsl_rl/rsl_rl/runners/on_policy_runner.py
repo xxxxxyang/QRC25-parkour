@@ -302,7 +302,10 @@ class OnPolicyRunner:
                 value = torch.mean(infotensor)
                 wandb_dict['Episode_rew/' + key] = value
                 ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
+
         mean_std = self.alg.actor_critic.std.mean()
+        min_std = self.alg.actor_critic.std.min()
+        max_std = self.alg.actor_critic.std.max()
         fps = int(self.num_steps_per_env * self.env.num_envs / (locs['collection_time'] + locs['learn_time']))
 
         wandb_dict['Loss/value_function'] = locs['mean_value_loss']
@@ -317,49 +320,42 @@ class OnPolicyRunner:
         wandb_dict['Loss/discriminator_accuracy'] = locs['mean_disc_acc']
 
         wandb_dict['Policy/mean_noise_std'] = mean_std.item()
+        wandb_dict['Policy/min_noise_std'] = min_std.item()
+        wandb_dict['Policy/max_noise_std'] = max_std.item()
         wandb_dict['Perf/total_fps'] = fps
         wandb_dict['Perf/collection time'] = locs['collection_time']
         wandb_dict['Perf/learning_time'] = locs['learn_time']
+
         if len(locs['rewbuffer']) > 0:
             try:
                 self.env.set_curriculum_metric(statistics.mean(locs['rewbuffer']))
             except Exception:
                 pass
             wandb_dict['Train/mean_reward'] = statistics.mean(locs['rewbuffer'])
-            # wandb_dict['Train/mean_reward_explr'] = statistics.mean(locs['rew_explr_buffer'])
-            # wandb_dict['Train/mean_reward_task'] = wandb_dict['Train/mean_reward'] - wandb_dict['Train/mean_reward_explr']
-            # wandb_dict['Train/mean_reward_entropy'] = statistics.mean(locs['rew_entropy_buffer'])
             wandb_dict['Train/mean_episode_length'] = statistics.mean(locs['lenbuffer'])
-            # if len(locs['rewbuffer_forward']) > 0:
-            #     wandb_dict['Train/forward_mean_reward'] = statistics.mean(locs['rewbuffer_forward'])
-            #     wandb_dict['Train/forward_mean_episode_length'] = statistics.mean(locs['lenbuffer_forward'])
-            # if len(locs['rewbuffer_backward']) > 0:
-            #     wandb_dict['Train/backward_mean_reward'] = statistics.mean(locs['rewbuffer_backward'])
-            #     wandb_dict['Train/backward_mean_episode_length'] = statistics.mean(locs['lenbuffer_backward'])
-            # wandb_dict['Train/mean_reward/time', statistics.mean(locs['rewbuffer']), self.tot_time)
-            # wandb_dict['Train/mean_episode_length/time', statistics.mean(locs['lenbuffer']), self.tot_time)
 
         wandb.log(wandb_dict, step=locs['it'])
 
-        str = f" \033[1m Learning iteration {locs['it']}/{self.current_learning_iteration + locs['num_learning_iterations']} \033[0m "
+        title = f" \033[1m Learning iteration {locs['it']}/{self.current_learning_iteration + locs['num_learning_iterations']} \033[0m "
 
         if len(locs['rewbuffer']) > 0:
-            log_string = (f"""{'#' * width}\n"""
-                          f"""{str.center(width, ' ')}\n\n"""
-                          f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
-                            'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
-                          f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
-                          f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
-                          f"""{'Discriminator loss:':>{pad}} {locs['mean_disc_loss']:.4f}\n"""
-                          f"""{'Discriminator accuracy:':>{pad}} {locs['mean_disc_acc']:.4f}\n"""
-                          f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
-                          f"""{'Mean reward (total):':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
-                          f"""{'Mean reward (task):':>{pad}} {statistics.mean(locs['rewbuffer']) - statistics.mean(locs['rew_explr_buffer']):.2f}\n"""
-                          f"""{'Mean reward (exploration):':>{pad}} {statistics.mean(locs['rew_explr_buffer']):.2f}\n"""
-                          f"""{'Mean reward (entropy):':>{pad}} {statistics.mean(locs['rew_entropy_buffer']):.2f}\n"""
-                          f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n""")
-                        #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
-                        #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
+            log_string = (
+                f"""{'#' * width}\n"""
+                f"""{title.center(width, ' ')}\n\n"""
+                f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs['collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
+                f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
+                f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
+                f"""{'Discriminator loss:':>{pad}} {locs['mean_disc_loss']:.4f}\n"""
+                f"""{'Discriminator accuracy:':>{pad}} {locs['mean_disc_acc']:.4f}\n"""
+                f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
+                f"""{'Min action noise std:':>{pad}} {min_std.item():.2f}\n"""
+                f"""{'Max action noise std:':>{pad}} {max_std.item():.2f}\n"""
+                f"""{'Mean reward (total):':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
+                f"""{'Mean reward (task):':>{pad}} {statistics.mean(locs['rewbuffer']) - statistics.mean(locs['rew_explr_buffer']):.2f}\n"""
+                f"""{'Mean reward (exploration):':>{pad}} {statistics.mean(locs['rew_explr_buffer']):.2f}\n"""
+                f"""{'Mean reward (entropy):':>{pad}} {statistics.mean(locs['rew_entropy_buffer']):.2f}\n"""
+                f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n"""
+            )
             if len(locs['rewbuffer_forward']) > 0:
                 log_string += f"""{'Forward mean reward:':>{pad}} {statistics.mean(locs['rewbuffer_forward']):.2f}\n"""
                 log_string += f"""{'Forward mean ep length:':>{pad}} {statistics.mean(locs['lenbuffer_forward']):.2f}\n"""
@@ -367,16 +363,17 @@ class OnPolicyRunner:
                 log_string += f"""{'Backward mean reward:':>{pad}} {statistics.mean(locs['rewbuffer_backward']):.2f}\n"""
                 log_string += f"""{'Backward mean ep length:':>{pad}} {statistics.mean(locs['lenbuffer_backward']):.2f}\n"""
         else:
-            log_string = (f"""{'#' * width}\n"""
-                          f"""{str.center(width, ' ')}\n\n"""
-                          f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
-                            'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
-                          f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
-                          f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
-                          f"""{'Estimator loss:':>{pad}} {locs['mean_estimator_loss']:.4f}\n"""
-                          f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n""")
-                        #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
-                        #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
+            log_string = (
+                f"""{'#' * width}\n"""
+                f"""{title.center(width, ' ')}\n\n"""
+                f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs['collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
+                f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
+                f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
+                f"""{'Estimator loss:':>{pad}} {locs['mean_estimator_loss']:.4f}\n"""
+                f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
+                f"""{'Min action noise std:':>{pad}} {min_std.item():.2f}\n"""
+                f"""{'Max action noise std:':>{pad}} {max_std.item():.2f}\n"""
+            )
 
         log_string += f"""{'-' * width}\n"""
         log_string += ep_string
@@ -384,11 +381,13 @@ class OnPolicyRunner:
         eta = self.tot_time / (curr_it + 1) * (locs['num_learning_iterations'] - curr_it)
         mins = eta // 60
         secs = eta % 60
-        log_string += (f"""{'-' * width}\n"""
-                       f"""{'Total timesteps:':>{pad}} {self.tot_timesteps}\n"""
-                       f"""{'Iteration time:':>{pad}} {iteration_time:.2f}s\n"""
-                       f"""{'Total time:':>{pad}} {self.tot_time:.2f}s\n"""
-                       f"""{'ETA:':>{pad}} {mins:.0f} mins {secs:.1f} s\n""")
+        log_string += (
+            f"""{'-' * width}\n"""
+            f"""{'Total timesteps:':>{pad}} {self.tot_timesteps}\n"""
+            f"""{'Iteration time:':>{pad}} {iteration_time:.2f}s\n"""
+            f"""{'Total time:':>{pad}} {self.tot_time:.2f}s\n"""
+            f"""{'ETA:':>{pad}} {mins:.0f} mins {secs:.1f} s\n"""
+        )
         print(log_string)
 
     def learn_vision(self, num_learning_iterations, init_at_random_ep_len=False):
@@ -553,6 +552,8 @@ class OnPolicyRunner:
                 wandb_dict['Episode_rew/' + key] = value
                 ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
         mean_std = self.alg.actor_critic.std.mean()
+        min_std = self.alg.actor_critic.std.min()
+        max_std = self.alg.actor_critic.std.max()
         fps = int(self.num_steps_per_env * self.env.num_envs / (locs['collection_time'] + locs['learn_time']))
 
         # belief encoder and depth_actor Loss
@@ -576,6 +577,8 @@ class OnPolicyRunner:
         # wandb_dict['Loss_depth/yaw'] = locs['yaw_loss']
 
         wandb_dict['Policy/mean_noise_std'] = mean_std.item()
+        wandb_dict['Policy/min_noise_std'] = min_std.item()
+        wandb_dict['Policy/max_noise_std'] = max_std.item()
         wandb_dict['Perf/total_fps'] = fps
         wandb_dict['Perf/collection time'] = locs['collection_time']
         wandb_dict['Perf/learning_time'] = locs['learn_time']
@@ -593,6 +596,10 @@ class OnPolicyRunner:
                           f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
                             'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
                           f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
+                          f"""{'Min action noise std:':>{pad}} {min_std.item():.2f}
+"""
+                          f"""{'Max action noise std:':>{pad}} {max_std.item():.2f}
+"""
                           f"""{'Mean reward (total):':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
                           f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n"""
                           f"""{'Reconstruction Loss:':>{pad}} {locs['recon_loss']:.4f}\n"""

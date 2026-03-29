@@ -360,6 +360,7 @@ class LeggedRobotCfg(BaseConfig):
             termination = 0.
             feet_air_time = 0.
             base_height = 0.
+            dof_error_max = -0.
     
         only_positive_rewards = True
         tracking_sigma = 0.1

@@ -79,30 +79,39 @@ class Go2ClimbCfg( LeggedRobotCfg ):
 
         class scales(LeggedRobotCfg.rewards.scales):
             # ===== 任务奖励 =====
-            tracking_goal_vel = 2.5   # [NEW PRIMARY] 核心：速度投影到goal方向
-            tracking_ang_vel_z = 0.3            # [OPTIONAL] 辅助朝向对齐（delta_yaw->0）
-                                                # 小权重，不要压过投影奖励
+            tracking_goal_vel = 2.5             # 主要任务奖励
+            tracking_ang_vel_z = 0.3            # 辅助朝向对齐（delta_yaw->0）
+            termination = -2.0
+
             tracking_lin_vel = 0.0              # 关掉
             tracking_lin_vel_forward = 0.0
             tracking_lin_vel_backward = 0.0
 
             # ===== 步态 =====
-            feet_air_time = 1.5
+            feet_air_time = 1.
+            feet_phase = 0.
+            feet_contact_balance = 0.
 
             # ===== 姿态 =====
             base_height = -0.
             orientation = -0.5
+            lin_vel_z = -0.5                    # 惩罚上下的垂直速度
 
             # ===== 正则化 =====
             action_rate = -0.01
             torques = -2e-6
-            lazy_stop = -0.2        # 保留，防止命令有速度时机器人不动
-            collision = -2.
+            delta_torques = -1e-7
+            lazy_stop = -0.2                    # 保留，防止命令有速度时机器人不动
             dof_acc = -5e-8
- 
-            stand_still = -1.
-            feet_phase = 0.
-            feet_contact_balance = 0.
+            dof_error = -0.04
+            dof_error_max = -0.05
+            hip_pos = -1.0
+            feet_stumble = -1.0
+            feet_edge = -1.0
+
+            # ===== 任务约束 =====
+            stand_still = -1.0
+            collision = -3.0
 
     class terrain( LeggedRobotCfg.terrain ):
         add_terrain_border = True
@@ -173,7 +182,7 @@ class Go2ClimbCfg( LeggedRobotCfg ):
 
 class Go2ClimbCfgPPO( LeggedRobotCfgPPO ):
     class algorithm( LeggedRobotCfgPPO.algorithm ):
-        entropy_coef = 0.01
+        entropy_coef = 0.0
     class runner( LeggedRobotCfgPPO.runner ):
         run_name = ''
         experiment_name = 'climb'

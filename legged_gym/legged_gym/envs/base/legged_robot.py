@@ -1145,7 +1145,7 @@ class LeggedRobot(BaseTask):
 
     def _reward_lin_vel_z(self):
         rew = torch.square(self.base_lin_vel[:, 2])
-        rew[self.env_class != 17] *= 0.
+        rew[self.env_class != 17] *= 0.1
         return rew
 
     def _reward_ang_vel_xy(self):
@@ -1274,6 +1274,11 @@ class LeggedRobot(BaseTask):
     def _reward_base_height(self):
         base_height = torch.mean(self.root_states[:, 2].unsqueeze(1) - self.measured_heights, dim=1)
         return torch.square(base_height - self.cfg.rewards.base_height_target)
+
+    def _reward_dof_error_max(self):
+        per_joint = torch.abs(self.dof_pos - self.default_dof_pos)
+        # 取每个环境中偏差最大的那个关节
+        return torch.max(per_joint, dim=1)[0]
 
     # ==================================================================
     # Visualization helpers

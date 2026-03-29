@@ -59,9 +59,8 @@ def split_and_pad_trajectories(tensor, dones):
     # Extract the individual trajectories
     trajectories = torch.split(tensor.transpose(1, 0).flatten(0, 1),trajectory_lengths_list)
     padded_trajectories = torch.nn.utils.rnn.pad_sequence(trajectories)
-
-
-    trajectory_masks = trajectory_lengths > torch.arange(0, tensor.shape[0], device=tensor.device).unsqueeze(1)
+    max_traj_len = padded_trajectories.shape[0]
+    trajectory_masks = trajectory_lengths > torch.arange(0, max_traj_len, device=tensor.device).unsqueeze(1)
     return padded_trajectories, trajectory_masks
 
 def unpad_trajectories(trajectories, masks):
