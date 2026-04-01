@@ -56,6 +56,7 @@ class LeggedRobotCfg(BaseConfig):
         env_spacing = 3.  # not used with heightfields/trimeshes 
         send_timeouts = True # send time out information to the algorithm
         episode_length_s = 20 # episode length in seconds
+        reset_warmup_steps = 10 # keep x/y commands zero for a few policy steps after reset
         obs_type = "og"
 
         # gamepad control
@@ -214,6 +215,7 @@ class LeggedRobotCfg(BaseConfig):
         num_goals = 8
 
     class commands:
+        cmd_smooth_alpha = 0.85
         curriculum = False
         max_curriculum = 1.
         num_commands = 4

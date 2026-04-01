@@ -28,27 +28,6 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
-# ============================================================
-# CHANGE SUMMARY (vs previous version)
-# ============================================================
-# Command logic simplified:
-#   - No command curriculum (cfg.commands.curriculum should be False)
-#   - has_goal + non-flat envs: vx sampled from [goal_vel_range_min, goal_vel_range_max]
-#     (fixed large range, reference extreme parkour style)
-#   - flat envs (env_class==17): vx sampled uniformly from full range including 0
-#     (to practice fine-grained vel tracking)
-#   - no_goal envs: vx sampled from full range including negative (same as before)
-#   - _update_command_curriculum removed (no longer called)
-#   - _resample_commands simplified: 3-branch logic, no per-env dead zones
-#
-# Reward functions:
-#   - _reward_tracking_goal_vel: clip-type, min(proj_vel, vx_ref)/vx_ref
-#     zero when vx_ref<=lin_clip, naturally penalizes backward motion
-#   - _reward_stand_still: penalizes actual velocity when cmd~0
-#   - _compute_projected_vel_reward: kept as exp-type for episode logging only
-#
-# Everything else (goals, delta_yaw, terrain curriculum, gap debug) unchanged.
-# ============================================================
 
 from legged_gym import LEGGED_GYM_ROOT_DIR, envs
 from time import time
@@ -150,6 +129,16 @@ class LeggedRobot(BaseTask):
         self.total_env_steps_counter += 1
         clip_actions = self.cfg.normalization.clip_actions / self.cfg.control.action_scale
         self.actions = torch.clip(actions, -clip_actions, clip_actions).to(self.device)
+
+        # ----------------------------------------------------------------
+        # WARMUP: override actions to zero so PD controller drives joints
+        # back to default_pos. This prevents the policy's random initial
+        # outputs from destabilising a freshly-reset robot.
+        # ----------------------------------------------------------------
+        warmup_mask = self.reset_warmup_buf > 0          # (num_envs,) bool
+        if warmup_mask.any():
+            self.actions[warmup_mask] = 0.0
+
         self.render()
 
         for _ in range(self.cfg.control.decimation):
@@ -256,6 +245,11 @@ class LeggedRobot(BaseTask):
         fake_delta_yaw = wrap_to_pi(self.fake_target_yaw - self.yaw)
         self.delta_yaw = torch.where(has_goals, real_delta_yaw, fake_delta_yaw)
         self.commands[:, 2] = self.delta_yaw
+
+        # clear yaw_cmd when vx=0
+        lin_clip = getattr(self.cfg.commands, 'lin_vel_clip', 0.1)
+        standing_mask = torch.abs(self.commands[:, 0]) < lin_clip
+        self.commands[standing_mask, 2] = 0.0
 
     # ------------------------------------------------------------------
     def post_physics_step(self):
@@ -384,7 +378,22 @@ class LeggedRobot(BaseTask):
 
         self._reset_dofs(env_ids)
         self._reset_root_states(env_ids)
-        self._resample_commands(env_ids)
+
+        # ----------------------------------------------------------------
+        # WARMUP setup:
+        #   - commands immediately set to zero (robot should stand still)
+        #   - pending_commands holds the real command to apply after warmup
+        #   - reset_warmup_buf counts down each control step
+        # ----------------------------------------------------------------
+        warmup_steps = getattr(self.cfg.env, 'reset_warmup_steps', 20)
+        self.reset_warmup_buf[env_ids] = warmup_steps
+        self.commands[env_ids, 0] = 0.0
+        self.commands[env_ids, 1] = 0.0
+        self.commands[env_ids, 2] = 0.0
+        self.smooth_commands[env_ids, 0] = 0.0
+        self.smooth_commands[env_ids, 1] = 0.0
+        # Sample the real command now; it will be applied when warmup ends
+        self._resample_commands(env_ids, target=self.pending_commands)
 
         self.gym.simulate(self.sim)
         self.gym.fetch_results(self.sim, True)
@@ -427,31 +436,10 @@ class LeggedRobot(BaseTask):
             lin_clip = self.cfg.commands.lin_vel_clip
 
             self.extras["episode"]["terrain_mean_level"] = torch.mean(self.terrain_levels[env_ids].float())
-            # self.extras["episode"]["terrain_has_goals_ratio"] = torch.mean(has_goals_mask.float())
             tc = self.env_class[env_ids]
-            # for idx, name in {17:"flat", 18:"step", 19:"gap", 16:"hurdle", 15:"parkour"}.items():
-            #     self.extras["episode"][f"terrain_frac_{name}"] = torch.mean((tc == idx).float())
-
-            # if has_goals_mask.any():
-            #     gc = cmds[has_goals_mask]
-            #     self.extras["episode"]["goals_cmd_mean_vx"] = torch.mean(gc[:, 0])
-            #     self.extras["episode"]["goals_cmd_frac_vx_pos"] = torch.mean((gc[:, 0] > lin_clip).float())
-            #     goals_done = (self._cur_goal_idx_before_reset[env_ids[has_goals_mask]].float()
-            #                   / max(self.cfg.terrain.num_goals, 1))
-            #     self.extras["episode"]["goals_completion_rate"] = torch.mean(goals_done)
-
-            # if no_goals_mask.any():
-            #     nc = cmds[no_goals_mask]
-            #     self.extras["episode"]["nogoals_cmd_mean_vx"] = torch.mean(nc[:, 0])
-            #     self.extras["episode"]["nogoals_cmd_frac_vx_pos"] = torch.mean((nc[:, 0] > lin_clip).float())
-            #     self.extras["episode"]["nogoals_mean_abs_delta_yaw"] = torch.mean(
-            #         torch.abs(self.delta_yaw[env_ids[no_goals_mask]]))
 
             step_count  = self.episode_step_count[env_ids].clamp(min=1)
             avg_tracking = self.episode_cmd_tracking_reward[env_ids] / step_count
-            # self.extras["episode"]["survival_ratio"] = torch.mean(
-            #     self.episode_length_buf[env_ids].float() / self.max_episode_length)
-            # self.extras["episode"]["avg_tracking_reward"] = torch.mean(avg_tracking)
 
         self.episode_length_buf[env_ids]          = 0
         self.episode_cmd_tracking_error[env_ids]  = 0
@@ -462,34 +450,6 @@ class LeggedRobot(BaseTask):
             self.extras["episode"]["terrain_level"] = torch.mean(self.terrain_levels.float())
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf
-
-        # # gap debug
-        # if self.init_done and hasattr(self, 'roll'):
-        #     gap_mask_reset = (self.env_class[env_ids] == 19)
-        #     if gap_mask_reset.any():
-        #         gap_ids = env_ids[gap_mask_reset]
-        #         n = len(gap_ids)
-
-        #         fell_in   = self.root_states[gap_ids, 2] < -0.25
-        #         rolled    = (torch.abs(self.roll[gap_ids]) > 1.5) | (torch.abs(self.pitch[gap_ids]) > 1.5)
-        #         timed_out = self.time_out_buf[gap_ids]
-
-        #         max_x        = self.episode_max_x_reached[gap_ids]
-        #         near_cnt     = self.episode_near_gap_count[gap_ids].clamp(min=1)
-        #         ret_cnt      = self.episode_retreat_count[gap_ids]
-        #         retreat_rate = ret_cnt / near_cnt
-
-        #         self.extras["episode"]["gap/frac_fell_in"]           = fell_in.float().mean()
-        #         self.extras["episode"]["gap/frac_rolled"]            = rolled.float().mean()
-        #         self.extras["episode"]["gap/frac_timeout"]           = timed_out.float().mean()
-        #         self.extras["episode"]["gap/mean_max_x_disp"]        = max_x.mean()
-        #         self.extras["episode"]["gap/max_x_p90"]              = max_x.kthvalue(max(1, int(0.9 * n)))[0]
-        #         self.extras["episode"]["gap/retreat_rate_near_gap"]  = retreat_rate.mean()
-        #         self.extras["episode"]["gap/frac_never_reached_gap"] = (max_x < 1.5).float().mean()
-
-        #         self.episode_max_x_reached[gap_ids]  = 0.
-        #         self.episode_near_gap_count[gap_ids] = 0.
-        #         self.episode_retreat_count[gap_ids]  = 0.
 
     # ------------------------------------------------------------------
     def compute_reward(self):
@@ -663,8 +623,9 @@ class LeggedRobot(BaseTask):
 
     # ------------------------------------------------------------------
     def _post_physics_step_callback(self):
-        if not self.cfg.env.keyboard_ctrl:
-            self._update_commands_based_on_goals()
+        # if not self.cfg.env.keyboard_ctrl:
+            # self._update_commands_based_on_goals()
+        self._update_commands_based_on_goals()
         if self.cfg.terrain.measure_heights:
             if self.global_counter % self.cfg.depth.update_interval == 0:
                 self.measured_heights = self._get_heights()
@@ -674,13 +635,68 @@ class LeggedRobot(BaseTask):
 
     # ------------------------------------------------------------------
     def _update_commands_based_on_goals(self):
-        """Periodic vx/vy resample. delta_yaw maintained by _update_goals every frame."""
+        """
+        Command lifecycle:
+          1. Warmup  : all commands zero, countdown.
+          2. Warmup end: flush pending to smooth_commands target, start smoothing.
+          3. Normal  : exponential smooth toward pending_commands (ref velocity).
+                       Periodic resample updates pending_commands (the ref).
+        """
+        cmd_alpha = getattr(self.cfg.commands, 'cmd_smooth_alpha', 0.9)
+
+        # ---- Step 1: warmup phase ----
+        warmup_mask = self.reset_warmup_buf > 0
+        if warmup_mask.any():
+            self.commands[warmup_mask, 0] = 0.0
+            self.commands[warmup_mask, 1] = 0.0
+            self.commands[warmup_mask, 2] = 0.0
+            self.smooth_commands[warmup_mask, 0] = 0.0
+            self.smooth_commands[warmup_mask, 1] = 0.0
+            self.reset_warmup_buf[warmup_mask] -= 1
+
+        # ---- Step 2: warmup just ended (buf: 1→0) ----
+        just_ended = warmup_mask & (self.reset_warmup_buf == 0)
+        if just_ended.any():
+            je_ids = just_ended.nonzero(as_tuple=False).flatten()
+            # smooth_commands starts at 0, will ramp toward pending via smoothing
+            self.smooth_commands[je_ids, 0] = 0.0
+            self.smooth_commands[je_ids, 1] = 0.0
+            # commands[:,2] maintained by _update_goals
+
+        # ---- Step 3: periodic resample (update the reference, not the actual cmd) ----
         resample_mask = (
             self.episode_length_buf % int(self.cfg.commands.resampling_time / self.dt) == 0
         )
+        resample_mask &= ~warmup_mask
+        resample_mask &= (self.reset_warmup_buf == 0)
         resample_ids = resample_mask.nonzero(as_tuple=False).flatten()
         if len(resample_ids) > 0:
-            self._resample_commands(resample_ids)
+            # Resample goes into pending_commands (the ref), NOT directly into commands
+            # This way the transition to the new velocity is also smoothed
+            self._resample_commands(resample_ids, target=self.pending_commands)
+
+        # ---- Step 4: exponential smoothing for all non-warmup envs ----
+        smooth_mask = (self.reset_warmup_buf == 0)
+        if smooth_mask.any():
+            self.smooth_commands[smooth_mask, 0] = (
+                cmd_alpha * self.smooth_commands[smooth_mask, 0]
+                + (1.0 - cmd_alpha) * self.pending_commands[smooth_mask, 0]
+            )
+            self.smooth_commands[smooth_mask, 1] = (
+                cmd_alpha * self.smooth_commands[smooth_mask, 1]
+                + (1.0 - cmd_alpha) * self.pending_commands[smooth_mask, 1]
+            )
+            # Dead-zone: snap to zero if very close to zero to avoid tiny drift commands
+            lin_clip = getattr(self.cfg.commands, 'lin_vel_clip', 0.1)
+            snap_mask = smooth_mask & (torch.abs(self.pending_commands[:, 0]) < lin_clip)
+            self.smooth_commands[snap_mask, 0] = 0.0
+
+            # keyboard_ctrl模式下跳过smooth覆盖，保留base_task.py键盘事件
+            # 直接写入的commands值，避免每步被smooth_commands覆盖掉
+            if not self.cfg.env.keyboard_ctrl:
+                self.commands[smooth_mask, 0] = self.smooth_commands[smooth_mask, 0]
+                self.commands[smooth_mask, 1] = self.smooth_commands[smooth_mask, 1]
+            # commands[:,2] = delta_yaw, written by _update_goals, do not touch
 
     def _gather_cur_goals(self, future=0):
         return self.env_goals.gather(
@@ -688,29 +704,23 @@ class LeggedRobot(BaseTask):
         ).squeeze(1)
 
     # ------------------------------------------------------------------
-    # [SIMPLIFIED] _resample_commands: 3-branch, no per-env dead zones or curriculum
+    # _resample_commands: 3-branch, no per-env dead zones or curriculum
     #
     # Branch 1 - has_goal + non-flat (step/gap/hurdle/parkour):
-    #   vx sampled from [goal_vel_min, goal_vel_max] (fixed large range, extreme-parkour style)
-    #   15% prob of vx=0 to learn in-place turning before moving
+    #   vx ~ [goal_vel_min, goal_vel_max], 15% prob zero
+    # Branch 2 - flat (env_class==17):
+    #   vx ~ [0, lin_vel_x_max]
+    # Branch 3 - no_goal non-flat:
+    #   vx ~ [-goal_vel_max, goal_vel_max], 10% prob zero
     #
-    # Branch 2 - flat (env_class==17), regardless of has_goal:
-    #   vx sampled uniformly from [-vx_max, vx_max] including 0
-    #   to practice fine-grained speed tracking across all velocities
-    #
-    # Branch 3 - no_goal (non-flat):
-    #   vx sampled from full range including negative
-    #   10% prob of vx=0
-    #
-    # Config params needed:
-    #   cfg.commands.goal_vel_min  (e.g. 0.5)  -- min forward speed for parkour terrains
-    #   cfg.commands.goal_vel_max  (e.g. 1.5)  -- max forward speed for parkour terrains
-    #   cfg.commands.lin_vel_x_max (e.g. 1.5)  -- flat terrain max speed (both directions)
-    #   cfg.commands.lin_vel_clip  (e.g. 0.1)  -- dead-zone threshold
+    # target=None  → write to self.commands  (normal resample)
+    # target=buf   → write to buf            (pending at reset time)
     # ------------------------------------------------------------------
-    def _resample_commands(self, env_ids):
+    def _resample_commands(self, env_ids, target=None):
         if len(env_ids) == 0:
             return
+        if target is None:
+            target = self.commands
 
         lin_clip    = getattr(self.cfg.commands, 'lin_vel_clip', 0.1)
         goal_vmin   = getattr(self.cfg.commands, 'goal_vel_min', 0.5)
@@ -718,47 +728,41 @@ class LeggedRobot(BaseTask):
         flat_vmax   = getattr(self.cfg.commands, 'lin_vel_x_max',
                               self.command_max_ranges["lin_vel_x"][1])
 
-        has_goals   = self.env_has_goals[env_ids]          # (N,) bool
-        is_flat     = (self.env_class[env_ids] == 17)      # (N,) bool
-        # parkour branch: has goal AND not flat
-        is_parkour  = has_goals & (~is_flat)
-        # no-goal non-flat branch
+        has_goals    = self.env_has_goals[env_ids]
+        is_flat      = (self.env_class[env_ids] == 17)
+        is_parkour   = has_goals & (~is_flat)
         is_nogoal_nf = (~has_goals) & (~is_flat)
 
-        N = len(env_ids)
-
-        # --- sample vx for all envs at once, then override per branch ---
+        N  = len(env_ids)
         vx = torch.zeros(N, device=self.device)
 
-        # Branch 1: parkour (has_goal + non-flat) -- fixed large speed range
+        # Branch 1: parkour
         if is_parkour.any():
-            pk_idx = is_parkour.nonzero(as_tuple=False).flatten()
+            pk_idx    = is_parkour.nonzero(as_tuple=False).flatten()
             zero_mask = torch.rand(len(pk_idx), device=self.device) < 0.15
-            pk_vx = torch.empty(len(pk_idx), device=self.device).uniform_(goal_vmin, goal_vmax)
+            pk_vx     = torch.empty(len(pk_idx), device=self.device).uniform_(goal_vmin, goal_vmax)
             pk_vx[zero_mask] = 0.0
             vx[pk_idx] = pk_vx
 
-        # Branch 2: flat -- full range including negative, uniform
+        # Branch 2: flat
         if is_flat.any():
             fl_idx = is_flat.nonzero(as_tuple=False).flatten()
             fl_vx  = torch.empty(len(fl_idx), device=self.device).uniform_(0, flat_vmax)
-            # dead-zone clip
             fl_vx[torch.abs(fl_vx) < lin_clip] = 0.0
             vx[fl_idx] = fl_vx
 
-        # Branch 3: no-goal non-flat -- full range including negative
+        # Branch 3: no-goal non-flat
         if is_nogoal_nf.any():
-            ng_idx  = is_nogoal_nf.nonzero(as_tuple=False).flatten()
-            zero_m  = torch.rand(len(ng_idx), device=self.device) < 0.10
-            ng_vx   = torch.empty(len(ng_idx), device=self.device).uniform_(-goal_vmax, goal_vmax)
+            ng_idx = is_nogoal_nf.nonzero(as_tuple=False).flatten()
+            zero_m = torch.rand(len(ng_idx), device=self.device) < 0.10
+            ng_vx  = torch.empty(len(ng_idx), device=self.device).uniform_(-goal_vmax, goal_vmax)
             ng_vx[torch.abs(ng_vx) < lin_clip] = 0.0
             ng_vx[zero_m] = 0.0
             vx[ng_idx] = ng_vx
 
-        self.commands[env_ids, 0] = vx
-        # vy always 0 (can extend if needed)
-        self.commands[env_ids, 1] = 0.0
-        # commands[:,2] = delta_yaw, maintained by _update_goals, not touched here
+        target[env_ids, 0] = vx
+        target[env_ids, 1] = 0.0
+        # col 2 (delta_yaw) maintained by _update_goals; never written here
 
     def _compute_torques(self, actions):
         actions_scaled = actions * self.cfg.control.action_scale
@@ -781,8 +785,40 @@ class LeggedRobot(BaseTask):
         return torch.clip(torques, -self.torque_limits, self.torque_limits)
 
     def _reset_dofs(self, env_ids):
-        self.dof_pos[env_ids] = (self.default_dof_pos
-                                 + torch_rand_float(0., 0.9, (len(env_ids), self.num_dof), device=self.device))
+        """
+        Symmetric reset with mirror-paired hip noise.
+        General joints: ±0.1 rad independent noise.
+        Hip abduction: left/right paired with opposite sign so the robot
+        starts laterally symmetric — prevents the policy from learning a
+        compensatory asymmetric gait to handle a systematic hip bias.
+        hip_indices order assumed: [FR, FL, RR, RL]
+        """
+        dof_noise = torch_rand_float(-0.1, 0.1, (len(env_ids), self.num_dof), device=self.device)
+        dof_pos   = self.default_dof_pos + dof_noise   # (N, num_dof)
+    
+        # Mirror-symmetric hip noise: sample one value per front/rear pair,
+        # apply +noise to right side, -noise to left side.
+        # This ensures lateral symmetry at spawn regardless of random seed.
+        front_hip_noise = torch_rand_float(
+            -0.05, 0.05, (len(env_ids), 1), device=self.device).squeeze(1)
+        rear_hip_noise  = torch_rand_float(
+            -0.05, 0.05, (len(env_ids), 1), device=self.device).squeeze(1)
+    
+        # hip_indices: [FR=0, FL=1, RR=2, RL=3]
+        dof_pos[:, self.hip_indices[0]] = (
+            self.default_dof_pos[:, self.hip_indices[0]] + front_hip_noise)   # FR: +noise
+        dof_pos[:, self.hip_indices[1]] = (
+            self.default_dof_pos[:, self.hip_indices[1]] - front_hip_noise)   # FL: -noise (mirror)
+        dof_pos[:, self.hip_indices[2]] = (
+            self.default_dof_pos[:, self.hip_indices[2]] + rear_hip_noise)    # RR: +noise
+        dof_pos[:, self.hip_indices[3]] = (
+            self.default_dof_pos[:, self.hip_indices[3]] - rear_hip_noise)    # RL: -noise (mirror)
+    
+        dof_pos = torch.max(
+            torch.min(dof_pos, self.dof_pos_limits[:, 1]),
+            self.dof_pos_limits[:, 0])
+    
+        self.dof_pos[env_ids] = dof_pos
         self.dof_vel[env_ids] = 0.
         env_ids_int32 = env_ids.to(dtype=torch.int32)
         self.gym.set_dof_state_tensor_indexed(
@@ -925,8 +961,16 @@ class LeggedRobot(BaseTask):
             self.num_envs, self.cfg.env.contact_buf_len, 4,
             device=self.device, dtype=torch.float)
 
-        self.commands       = torch.zeros(self.num_envs, self.cfg.commands.num_commands,
-                                          dtype=torch.float, device=self.device)
+        self.commands = torch.zeros(self.num_envs, self.cfg.commands.num_commands,
+                                    dtype=torch.float, device=self.device)
+        # pending_commands: holds the sampled command during warmup,
+        # flushed to self.commands when warmup ends
+        self.pending_commands = torch.zeros(self.num_envs, self.cfg.commands.num_commands,
+                                            dtype=torch.float, device=self.device)
+        # 新增：平滑后的实际命令目标（vx/vy分量，[:, 2]仍由_update_goals维护）
+        self.smooth_commands = torch.zeros(self.num_envs, self.cfg.commands.num_commands,
+                                            dtype=torch.float, device=self.device)
+
         self.feet_air_time  = torch.zeros(self.num_envs, self.feet_indices.shape[0],
                                           dtype=torch.float, device=self.device)
         self.last_contacts  = torch.zeros(self.num_envs, len(self.feet_indices),
@@ -982,8 +1026,9 @@ class LeggedRobot(BaseTask):
                 self.env_has_goals[:] = torch.from_numpy(
                     self.terrain.has_goals[levels, types]).to(self.device).to(torch.bool)
 
-        self.fake_target_yaw = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
-        self.delta_yaw       = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.fake_target_yaw  = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.delta_yaw        = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.reset_warmup_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
 
         # episode stats
         self.sampled_x_cmd_buffer         = torch.zeros(self.num_envs, device=self.device)
@@ -993,9 +1038,8 @@ class LeggedRobot(BaseTask):
         self.episode_cmd_tracking_reward   = torch.zeros(self.num_envs, device=self.device)
         self.episode_step_count            = torch.zeros(self.num_envs, device=self.device)
 
-        # command ranges: only used for compatibility lookups (goal_vel_max fallback)
+        # command ranges
         self.command_max_ranges = class_to_dict(self.cfg.commands.max_ranges)
-        # no per-env command_ranges/dead_zones needed since curriculum is removed
         self.command_ranges = {
             "lin_vel_x": torch.tensor(
                 [self.command_max_ranges["lin_vel_x"][0],
@@ -1007,7 +1051,10 @@ class LeggedRobot(BaseTask):
                          ).unsqueeze(0).expand(self.num_envs, -1),
         }
 
-        self._resample_commands(torch.arange(self.num_envs, device=self.device))
+        # Initial command sample for both buffers
+        all_ids = torch.arange(self.num_envs, device=self.device)
+        self._resample_commands(all_ids)
+        self._resample_commands(all_ids, target=self.pending_commands)
 
         # gap debug buffers
         self.episode_max_x_reached    = torch.zeros(self.num_envs, device=self.device)
@@ -1070,7 +1117,7 @@ class LeggedRobot(BaseTask):
         for rew in self.reward_scales:
             self.reward_scales[rew] = self.reward_scales[rew] / 1
         self.command_max_ranges = class_to_dict(self.cfg.commands.max_ranges)
-        self.command_ranges     = None  # will be set in _init_buffers
+        self.command_ranges     = None
         if self.cfg.terrain.mesh_type not in ['heightfield', 'trimesh']:
             self.cfg.terrain.curriculum = False
         self.max_episode_length_s = self.cfg.env.episode_length_s
@@ -1094,10 +1141,10 @@ class LeggedRobot(BaseTask):
     def _reward_tracking_goal_vel(self):
         """
         Clip-type tracking reward.
-        - vx_ref <= lin_clip  →  reward = 0  (stand_still handles this case)
-        - 0 < proj_vel < vx_ref  →  linear in [0, 1)
-        - proj_vel >= vx_ref     →  reward = 1  (capped, no extra for overshooting)
-        - proj_vel < 0           →  reward < 0  (natural penalty for going backward)
+        - vx_ref <= lin_clip  →  reward = 0
+        - 0 < proj_vel < vx_ref  →  linear [0, 1)
+        - proj_vel >= vx_ref     →  reward = 1  (capped)
+        - proj_vel < 0           →  reward < 0  (natural backward penalty)
         """
         target_yaw  = self.yaw + self.delta_yaw
         goal_dir    = torch.stack([torch.cos(target_yaw), torch.sin(target_yaw)], dim=-1)
@@ -1107,24 +1154,43 @@ class LeggedRobot(BaseTask):
 
         moving_mask = (vx_ref > lin_clip).float()
         moving_rew  = torch.minimum(proj_vel, vx_ref) / (vx_ref + 1e-5)
-        moving_rew  = torch.clamp(moving_rew, max=1.0)  # cap upside; keep negative for backward
+        moving_rew  = torch.clamp(moving_rew, max=1.0)
 
         return moving_rew * moving_mask
 
     def _reward_stand_still(self):
-        """
-        Penalize actual motion when command is near zero.
-        Activated only when vx_ref <= lin_clip (complement of tracking_goal_vel mask).
-        """
         lin_clip      = getattr(self.cfg.commands, 'lin_vel_clip', 0.1)
         cmd_near_zero = (torch.norm(self.commands[:, :2], dim=1) < lin_clip).float()
         vel_penalty   = torch.norm(self.root_states[:, 7:9], dim=-1)
-        joint_penalty = torch.sum(torch.abs(self.dof_pos - self.default_dof_pos), dim=1) * 0.1
+
+        in_warmup = (self.reset_warmup_buf > 0).float()
+
+        # Symmetric joint penalty: compute left/right sides separately and average.
+        # Avoids the situation where one-sided joint deviation dominates the sum
+        # and the policy learns to hold one side still while the other drifts.
+        # Index layout (hip_indices: FR=0,FL=1,RR=2,RL=3; same pattern for thigh/calf)
+        right_idx = torch.cat([
+            self.hip_indices[[0, 2]],
+            self.thigh_indices[[0, 2]],
+            self.calf_indices[[0, 2]]])
+        left_idx  = torch.cat([
+            self.hip_indices[[1, 3]],
+            self.thigh_indices[[1, 3]],
+            self.calf_indices[[1, 3]]])
+
+        right_err = torch.mean(
+            torch.abs(self.dof_pos[:, right_idx] - self.default_dof_pos[:, right_idx]), dim=1)
+        left_err  = torch.mean(
+            torch.abs(self.dof_pos[:, left_idx]  - self.default_dof_pos[:, left_idx]),  dim=1)
+
+        joint_penalty = (right_err + left_err) * 0.5 * 0.1 * (1.0 - in_warmup)
+
         return (vel_penalty + joint_penalty) * cmd_near_zero
 
     def _reward_tracking_ang_vel_z(self):
-        """Heading alignment bonus: exp(-delta_yaw^2/sigma). Small weight."""
-        return torch.exp(-torch.square(self.delta_yaw) / self.cfg.rewards.tracking_sigma)
+        lin_clip = getattr(self.cfg.commands, 'lin_vel_clip', 0.1)
+        moving_mask = (torch.abs(self.commands[:, 0]) > lin_clip).float()
+        return torch.exp(-torch.square(self.delta_yaw) / self.cfg.rewards.tracking_sigma) * moving_mask
 
     def _reward_tracking_lin_vel(self):
         lin_vel_error = torch.sum(
@@ -1155,7 +1221,8 @@ class LeggedRobot(BaseTask):
         return torch.sum(torch.square(self.projected_gravity[:, :2]), dim=1)
 
     def _reward_roll_orientation(self):
-        return torch.square(self.projected_gravity[:, 0])
+        in_warmup = (self.reset_warmup_buf > 0).float()
+        return torch.square(self.projected_gravity[:, 0]) * (1.0 - in_warmup)
 
     def _reward_pitch_orientation(self):
         return torch.square(self.projected_gravity[:, 1])
@@ -1264,11 +1331,13 @@ class LeggedRobot(BaseTask):
         lin_cmd_nonzero = torch.norm(self.commands[:, :2], dim=1) > lin_vel_clip
         lin_penalty = torch.square(lin_vel_error) * lin_cmd_nonzero.float()
 
+        moving_mask = (torch.abs(self.commands[:, 0]) > lin_vel_clip).float()  # 新增
         kp = getattr(self.cfg.commands, 'lazy_stop_wz_kp', 1.0)
         ang_vel_z_max = self.command_max_ranges["ang_vel_z"][1]
         expected_wz   = torch.clamp(kp * self.delta_yaw, -ang_vel_z_max, ang_vel_z_max)
         ang_penalty   = (torch.square(self.base_ang_vel[:, 2] - expected_wz)
-                         * (torch.abs(self.delta_yaw) > 0.3).float())
+                         * (torch.abs(self.delta_yaw) > 0.3).float()
+                         * moving_mask)  # 新增 moving_mask
         return lin_penalty + 0.5 * ang_penalty
 
     def _reward_base_height(self):
@@ -1277,7 +1346,6 @@ class LeggedRobot(BaseTask):
 
     def _reward_dof_error_max(self):
         per_joint = torch.abs(self.dof_pos - self.default_dof_pos)
-        # 取每个环境中偏差最大的那个关节
         return torch.max(per_joint, dim=1)[0]
 
     # ==================================================================
@@ -1422,7 +1490,7 @@ class LeggedRobot(BaseTask):
         return heights.view(self.num_envs, -1) * self.terrain.cfg.vertical_scale
 
     # ------------------------------------------------------------------
-    # Gym env creation helpers (unchanged)
+    # Gym env creation helpers
     # ------------------------------------------------------------------
 
     def _create_ground_plane(self):

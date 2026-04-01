@@ -53,6 +53,7 @@ class Go2ClimbCfg( LeggedRobotCfg ):
 
     class env( LeggedRobotCfg.env ):
         num_envs = 4096
+        reset_warmup_steps = 10
         # num_envs = 6144
 
     class control( LeggedRobotCfg.control ):
@@ -94,7 +95,8 @@ class Go2ClimbCfg( LeggedRobotCfg ):
 
             # ===== 姿态 =====
             base_height = -0.
-            orientation = -0.5
+            orientation = -1.0
+            roll_orientation = -0.5
             lin_vel_z = -0.5                    # 惩罚上下的垂直速度
 
             # ===== 正则化 =====
@@ -145,6 +147,7 @@ class Go2ClimbCfg( LeggedRobotCfg ):
         num_cols = 20
 
     class commands(LeggedRobotCfg.commands):
+        cmd_smooth_alpha = 0.85 # 平滑命令系数，越大越平滑
         curriculum = False
         # lin_vel_clip = 0.2 + 1e-7
         # ang_vel_clip = 0.2 + 1e-7      # 保留字段，不影响delta_yaw逻辑
@@ -186,4 +189,3 @@ class Go2ClimbCfgPPO( LeggedRobotCfgPPO ):
     class runner( LeggedRobotCfgPPO.runner ):
         run_name = ''
         experiment_name = 'climb'
-
