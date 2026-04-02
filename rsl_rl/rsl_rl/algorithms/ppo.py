@@ -36,6 +36,7 @@ from rsl_rl.modules import ActorCriticRMA
 from rsl_rl.storage import RolloutStorage
 import wandb
 from rsl_rl.utils import unpad_trajectories
+from rsl_rl.algorithms.symmetry import _mirror_full_obs
 
 
 class RMS(object):
@@ -80,6 +81,7 @@ class PPO:
                  device='cpu',
                  dagger_update_freq=20,
                  priv_reg_coef_schedual = [0, 0, 0],
+                 symmetry = None,
                  **kwargs
                  ):
 
@@ -148,8 +150,20 @@ class PPO:
             # self.gradnorm_shared_params = [next(self.depth_encoder.parameters())]
             # self.gradnorm_shared_params = list(self.depth_encoder.parameters())
 
-    def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape):
-        self.storage = RolloutStorage(num_envs, num_transitions_per_env, actor_obs_shape,  critic_obs_shape, action_shape, self.device)
+        # Symmetry
+        self.symmetry = symmetry
+
+    def init_storage(self, num_envs, num_transitions_per_env,
+                     actor_obs_shape, critic_obs_shape, action_shape):
+        # 如果启用对称增强，storage容量翻倍
+        storage_envs = num_envs * 2 if (self.symmetry is not None and self.symmetry.enabled) else num_envs
+        self.storage = RolloutStorage(
+            storage_envs, num_transitions_per_env,
+            actor_obs_shape, critic_obs_shape, action_shape,
+            self.device
+        )
+        # 保存原始 num_envs 供后续使用
+        self._real_num_envs = num_envs
 
     def test_mode(self):
         self.actor_critic.test()
@@ -185,17 +199,68 @@ class PPO:
         self.transition.dones = dones
         # Bootstrapping on time outs
         if 'time_outs' in infos:
-            self.transition.rewards += self.gamma * torch.squeeze(self.transition.values * infos['time_outs'].unsqueeze(1).to(self.device), 1)
+            self.transition.rewards += self.gamma * torch.squeeze(
+                self.transition.values * infos['time_outs'].unsqueeze(1).to(self.device), 1
+            )
 
-        # Record the transition
-        self.storage.add_transitions(self.transition)
+        # ================================================================
+        # 对称数据增强：将 transition 扩充一倍后存入 storage
+        # ================================================================
+        if self.symmetry is not None and self.symmetry.enabled:
+            (obs_aug, critic_obs_aug,
+             acts_aug, rews_aug, dones_aug) = self.symmetry.augment(
+                self.transition.observations,
+                self.transition.critic_observations,
+                self.transition.actions,
+                self.transition.rewards,
+                self.transition.dones,
+            )
+
+            # 其他字段也需要复制
+            aug_transition = RolloutStorage.Transition()
+            aug_transition.observations        = obs_aug
+            aug_transition.critic_observations = critic_obs_aug
+            aug_transition.actions             = acts_aug
+            aug_transition.rewards             = rews_aug
+            aug_transition.dones               = dones_aug
+
+            # values / log_prob / mu / sigma 直接复制（镜像策略在对称obs下理论上应输出相同值）
+            aug_transition.values              = self.transition.values.repeat(2, *([1]*(self.transition.values.dim()-1)))
+            aug_transition.actions_log_prob    = self.transition.actions_log_prob.repeat(2)
+            aug_transition.action_mean         = self.transition.action_mean.repeat(2, 1)
+            aug_transition.action_sigma        = self.transition.action_sigma.repeat(2, 1)
+
+            self.storage.add_transitions(aug_transition)
+            aug_transition.clear()
+        else:
+            # 原始路径
+            self.storage.add_transitions(self.transition)
+
         self.transition.clear()
         self.actor_critic.reset(dones)
 
         return rewards_total
     
     def compute_returns(self, last_critic_obs):
-        last_values= self.actor_critic.evaluate(last_critic_obs).detach()
+        last_values = self.actor_critic.evaluate(last_critic_obs).detach()
+
+        # 如果启用了对称增强，storage是2倍大小，需要把last_values也翻倍
+        if self.symmetry is not None and self.symmetry.enabled:
+            # 对 last_critic_obs 做镜像，得到对称版本的value估计
+            last_critic_obs_mirror = _mirror_full_obs(
+                last_critic_obs,
+                n_rhythm=self.symmetry.n_rhythm,
+                n_proprio=self.symmetry.n_proprio,
+                n_scan=self.symmetry.n_scan,
+                n_priv=self.symmetry.n_priv,
+                n_priv_latent=self.symmetry.n_priv_latent,
+                history_len=self.symmetry.history_len,
+                mirror_priv=True,
+            )
+            last_values_mirror = self.actor_critic.evaluate(last_critic_obs_mirror).detach()
+            # 拼接：[原始, 镜像]，与storage中数据顺序一致
+            last_values = torch.cat([last_values, last_values_mirror], dim=0)
+
         self.storage.compute_returns(last_values, self.gamma, self.lam)
 
     def update(self):

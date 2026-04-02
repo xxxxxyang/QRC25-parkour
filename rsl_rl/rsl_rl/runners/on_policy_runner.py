@@ -41,7 +41,7 @@ import json
 # import ml_runlog
 import datetime
 
-from rsl_rl.algorithms import PPO
+from rsl_rl.algorithms import PPO, SymmetricAugmentation
 from rsl_rl.modules import *
 from rsl_rl.env import VecEnv
 from rsl_rl.utils.utils import cfg_to_dict
@@ -97,10 +97,15 @@ class OnPolicyRunner:
         # self.depth_encoder_criterion = nn.MSELoss()
         # Create algorithm
         alg_class = eval(self.cfg["algorithm_class_name"]) # PPO
+        symmetry_enabled = train_cfg.get("symmetry", {}).get("enabled", False)
+        symmetry = SymmetricAugmentation(env.cfg, enabled=symmetry_enabled) if symmetry_enabled else None
+        if symmetry_enabled:
+            print("[Symmetry] enable, storage x2")
         self.alg: PPO = alg_class(actor_critic, 
                                   estimator, self.estimator_cfg, 
                                   depth_encoder, self.depth_encoder_cfg, depth_actor,
-                                  device=self.device, **self.alg_cfg)
+                                  device=self.device, symmetry=symmetry,
+                                  **self.alg_cfg)
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
         self.save_interval = self.cfg["save_interval"]
         self.dagger_update_freq = self.alg_cfg["dagger_update_freq"]

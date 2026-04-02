@@ -439,6 +439,9 @@ class LeggedRobotCfgPPO(BaseConfig):
         priv_reg_coef_schedual = [0, 0.1, 2000, 3000]
         priv_reg_coef_schedual_resume = [0, 0.1, 0, 1]
     
+    class symmetry:
+        enabled = False   # 是否启用对称增强
+
     class depth_encoder:
         if_depth = LeggedRobotCfg.depth.use_camera
         depth_shape = LeggedRobotCfg.depth.resized

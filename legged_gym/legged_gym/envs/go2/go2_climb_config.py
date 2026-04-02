@@ -186,6 +186,10 @@ class Go2ClimbCfg( LeggedRobotCfg ):
 class Go2ClimbCfgPPO( LeggedRobotCfgPPO ):
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         entropy_coef = 0.0
+
+    class symmetry( LeggedRobotCfgPPO.symmetry ):
+        enabled = True
+
     class runner( LeggedRobotCfgPPO.runner ):
         run_name = ''
         experiment_name = 'climb'

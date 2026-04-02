@@ -29,3 +29,4 @@
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
 from .ppo import PPO
+from .symmetry import SymmetricAugmentation, _mirror_full_obs
