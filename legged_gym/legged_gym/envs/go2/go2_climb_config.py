@@ -89,7 +89,7 @@ class Go2ClimbCfg( LeggedRobotCfg ):
             tracking_lin_vel_backward = 0.0
 
             # ===== 步态 =====
-            feet_air_time = 1.
+            feet_air_time = 1.5
             feet_phase = 0.
             feet_contact_balance = 0.
 
@@ -106,14 +106,14 @@ class Go2ClimbCfg( LeggedRobotCfg ):
             lazy_stop = -0.2                    # 保留，防止命令有速度时机器人不动
             dof_acc = -5e-8
             dof_error = -0.04
-            dof_error_max = -0.05
+            dof_error_max = -0.02
             hip_pos = -1.0
-            feet_stumble = -1.0
+            feet_stumble = -0.5
             feet_edge = -1.0
 
             # ===== 任务约束 =====
             stand_still = -1.0
-            collision = -3.0
+            collision = -1.5
 
     class terrain( LeggedRobotCfg.terrain ):
         add_terrain_border = True
@@ -188,7 +188,7 @@ class Go2ClimbCfgPPO( LeggedRobotCfgPPO ):
         entropy_coef = 0.0
 
     class symmetry( LeggedRobotCfgPPO.symmetry ):
-        enabled = True
+        enabled = False
 
     class runner( LeggedRobotCfgPPO.runner ):
         run_name = ''

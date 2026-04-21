@@ -1162,13 +1162,9 @@ class LeggedRobot(BaseTask):
         lin_clip      = getattr(self.cfg.commands, 'lin_vel_clip', 0.1)
         cmd_near_zero = (torch.norm(self.commands[:, :2], dim=1) < lin_clip).float()
         vel_penalty   = torch.norm(self.root_states[:, 7:9], dim=-1)
-
+    
         in_warmup = (self.reset_warmup_buf > 0).float()
-
-        # Symmetric joint penalty: compute left/right sides separately and average.
-        # Avoids the situation where one-sided joint deviation dominates the sum
-        # and the policy learns to hold one side still while the other drifts.
-        # Index layout (hip_indices: FR=0,FL=1,RR=2,RL=3; same pattern for thigh/calf)
+    
         right_idx = torch.cat([
             self.hip_indices[[0, 2]],
             self.thigh_indices[[0, 2]],
@@ -1177,14 +1173,15 @@ class LeggedRobot(BaseTask):
             self.hip_indices[[1, 3]],
             self.thigh_indices[[1, 3]],
             self.calf_indices[[1, 3]]])
-
+    
         right_err = torch.mean(
             torch.abs(self.dof_pos[:, right_idx] - self.default_dof_pos[:, right_idx]), dim=1)
         left_err  = torch.mean(
             torch.abs(self.dof_pos[:, left_idx]  - self.default_dof_pos[:, left_idx]),  dim=1)
-
-        joint_penalty = (right_err + left_err) * 0.5 * 0.1 * (1.0 - in_warmup)
-
+    
+        # 0.1 → 1.0，实际惩罚强度提升10倍
+        joint_penalty = (right_err + left_err) * 0.5 * 1.0 * (1.0 - in_warmup)
+    
         return (vel_penalty + joint_penalty) * cmd_near_zero
 
     def _reward_tracking_ang_vel_z(self):
