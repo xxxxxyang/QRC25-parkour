@@ -545,7 +545,7 @@ class LeggedRobot(BaseTask):
     # ------------------------------------------------------------------
     def create_sim(self):
         self.up_axis_idx = 2
-        if self.cfg.depth.use_camera:
+        if self.cfg.depth.use_camera or getattr(self.cfg.env, "sequence_camera", False):
             self.graphics_device_id = self.sim_device_id
         self.sim = self.gym.create_sim(
             self.sim_device_id, self.graphics_device_id,
