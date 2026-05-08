@@ -178,30 +178,34 @@ def resolve_output_path(path, log_dir):
     return os.path.join(LEGGED_GYM_ROOT_DIR, path)
 
 
-def set_capture_camera(env, args, initial_root_pos=None):
+def get_sequence_root_pos(env, args):
+    return env.root_states[args.seq_env_id, :3].detach().cpu().numpy()
+
+
+def set_capture_camera(env, args, camera_anchor_pos=None):
     env.lookat_id = args.seq_env_id
     offset = torch.tensor(args.seq_camera_offset, dtype=torch.float, device=env.device)
 
     if args.seq_fixed_camera:
         env.free_cam = True
-        if initial_root_pos is None:
-            root = env.root_states[args.seq_env_id, :3].detach().cpu().numpy()
-        else:
-            root = initial_root_pos
+        root = get_sequence_root_pos(env, args) if camera_anchor_pos is None else camera_anchor_pos
         cam_pos = root + np.array(args.seq_camera_offset, dtype=np.float32)
         lookat = root + np.array(args.seq_camera_lookat_offset, dtype=np.float32)
         env.set_camera(cam_pos, lookat)
+        return root.copy()
     else:
         env.free_cam = False
         env.lookat_vec = offset
+        return None
 
 
-def capture_viewer_frame(env, args, frame_path, initial_root_pos=None):
+def capture_viewer_frame(env, args, frame_path, camera_anchor_pos=None):
     if env.viewer is None:
         raise RuntimeError("Viewer is not available. Run without --headless to capture sequence images.")
-    set_capture_camera(env, args, initial_root_pos)
+    camera_anchor_pos = set_capture_camera(env, args, camera_anchor_pos)
     env.render(sync_frame_time=False)
     env.gym.write_viewer_image_to_file(env.viewer, frame_path)
+    return camera_anchor_pos
 
 
 def create_sequence_camera(env, args):
@@ -215,14 +219,11 @@ def create_sequence_camera(env, args):
     return camera_handle
 
 
-def set_sequence_camera_location(env, args, camera_handle, initial_root_pos=None):
+def set_sequence_camera_location(env, args, camera_handle, camera_anchor_pos=None):
     if args.seq_fixed_camera:
-        if initial_root_pos is None:
-            root = env.root_states[args.seq_env_id, :3].detach().cpu().numpy()
-        else:
-            root = initial_root_pos
+        root = get_sequence_root_pos(env, args) if camera_anchor_pos is None else camera_anchor_pos
     else:
-        root = env.root_states[args.seq_env_id, :3].detach().cpu().numpy()
+        root = get_sequence_root_pos(env, args)
 
     cam_pos = root + np.array(args.seq_camera_offset, dtype=np.float32)
     lookat = root + np.array(args.seq_camera_lookat_offset, dtype=np.float32)
@@ -232,10 +233,11 @@ def set_sequence_camera_location(env, args, camera_handle, initial_root_pos=None
         gymapi.Vec3(*cam_pos),
         gymapi.Vec3(*lookat),
     )
+    return root.copy() if args.seq_fixed_camera else None
 
 
-def capture_camera_frame(env, args, camera_handle, frame_path, initial_root_pos=None):
-    set_sequence_camera_location(env, args, camera_handle, initial_root_pos)
+def capture_camera_frame(env, args, camera_handle, frame_path, camera_anchor_pos=None):
+    camera_anchor_pos = set_sequence_camera_location(env, args, camera_handle, camera_anchor_pos)
     if env.device != "cpu":
         env.gym.fetch_results(env.sim, True)
     env.gym.step_graphics(env.sim)
@@ -250,13 +252,14 @@ def capture_camera_frame(env, args, camera_handle, frame_path, initial_root_pos=
     frame = cv2.cvtColor(image[:, :, :3], cv2.COLOR_RGB2BGR)
     if not cv2.imwrite(frame_path, frame):
         raise RuntimeError(f"Failed to write captured frame: {frame_path}")
+    return camera_anchor_pos
 
 
-def capture_frame(env, args, frame_path, camera_handle=None, initial_root_pos=None):
+def capture_frame(env, args, frame_path, camera_handle=None, camera_anchor_pos=None):
     if args.seq_capture_mode == "viewer":
-        capture_viewer_frame(env, args, frame_path, initial_root_pos)
+        return capture_viewer_frame(env, args, frame_path, camera_anchor_pos)
     else:
-        capture_camera_frame(env, args, camera_handle, frame_path, initial_root_pos)
+        return capture_camera_frame(env, args, camera_handle, frame_path, camera_anchor_pos)
 
 
 def draw_label(frame, text):
@@ -427,8 +430,7 @@ def play(args):
     frame_dir = os.path.join(os.path.dirname(output_path), os.path.splitext(os.path.basename(output_path))[0] + "_frames")
     os.makedirs(frame_dir, exist_ok=True)
 
-    initial_root_pos = env.root_states[args.seq_env_id, :3].detach().cpu().numpy()
-    set_capture_camera(env, args, initial_root_pos)
+    camera_anchor_pos = None
 
     infos = {}
     infos["depth"] = env.depth_buffer.clone().to(ppo_runner.device)[:, -1] if getattr(ppo_runner, "if_depth", False) else None
@@ -437,14 +439,14 @@ def play(args):
     capture_set = set(capture_steps)
     if 0 in capture_set:
         frame_path = os.path.join(frame_dir, "frame_000000.png")
-        capture_frame(env, args, frame_path, camera_handle, initial_root_pos)
+        camera_anchor_pos = capture_frame(env, args, frame_path, camera_handle, camera_anchor_pos)
         frame_infos.append((frame_path, 0))
 
     for step in tqdm(range(1, total_steps + 1), desc="capturing sequence"):
         obs, _, _, _, infos = run_policy_step(env, ppo_runner, policy, depth_encoder, infos, obs)
         if step in capture_set:
             frame_path = os.path.join(frame_dir, f"frame_{step:06d}.png")
-            capture_frame(env, args, frame_path, camera_handle, initial_root_pos)
+            camera_anchor_pos = capture_frame(env, args, frame_path, camera_handle, camera_anchor_pos)
             frame_infos.append((frame_path, step))
 
     compose_sequence_image(frame_infos, output_path, args, env.dt)
