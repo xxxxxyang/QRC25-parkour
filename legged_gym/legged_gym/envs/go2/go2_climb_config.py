@@ -113,7 +113,7 @@ class Go2ClimbCfg( LeggedRobotCfg ):
                         "large stairs up": 0.,
                         "large stairs down": 0.,
                         "parkour": 0.,
-                        "parkour_hurdle": 0.4,
+                        "parkour_hurdle": 0.0,
                         "parkour_flat": 0.2,
                         "parkour_step": 0.4,
                         "parkour_gap": 0.,
