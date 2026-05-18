@@ -623,6 +623,10 @@ class LeggedRobot(BaseTask):
 
         # set small commands to zero
         self.commands[env_ids, :2] *= torch.abs(self.commands[env_ids, 0:1]) > self.cfg.commands.lin_vel_clip
+        stop_command_prob = getattr(self.cfg.commands, "stop_command_prob", 0.0)
+        if stop_command_prob > 0.0 and len(env_ids) > 0:
+            stop_mask = torch.rand(len(env_ids), device=self.device) < stop_command_prob
+            self.commands[env_ids[stop_mask], :3] = 0.
 
     def _compute_torques(self, actions):
         """ Compute torques from actions.
@@ -1381,7 +1385,10 @@ class LeggedRobot(BaseTask):
         return self.reset_buf * ~self.time_out_buf
     
     def _reward_stand_still(self):
-        # Penalize motion at zero commands
-        return torch.sum(torch.abs(self.dof_pos - self.default_dof_pos), dim=1) \
-            * (torch.norm(self.commands[:, :2], dim=1) < 0.1) \
-            * (torch.abs(self.commands[:, 2]) < 0.2)
+        # Penalize posture error and base drift at zero commands.
+        stop_mask = (torch.norm(self.commands[:, :2], dim=1) < 0.1) \
+            & (torch.abs(self.commands[:, 2]) < 0.2)
+        pose_error = torch.sum(torch.abs(self.dof_pos - self.default_dof_pos), dim=1)
+        lin_vel_error = torch.sum(torch.square(self.base_lin_vel[:, :2]), dim=1)
+        yaw_vel_error = torch.square(self.base_ang_vel[:, 2])
+        return (pose_error + lin_vel_error + 0.5 * yaw_vel_error) * stop_mask

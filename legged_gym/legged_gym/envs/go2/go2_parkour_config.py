@@ -70,6 +70,11 @@ class Go2ParkourCfg( LeggedRobotCfg ):
     class rewards( LeggedRobotCfg.rewards ):
         soft_dof_pos_limit = 0.9
         base_height_target = 0.25
+        class scales( LeggedRobotCfg.rewards.scales ):
+            stand_still = -1.0
+
+    class commands( LeggedRobotCfg.commands ):
+        stop_command_prob = 0.15
 
     class terrain( LeggedRobotCfg.terrain ):
         terrain_dict = {"smooth slope": 0., 

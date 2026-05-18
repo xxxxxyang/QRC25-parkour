@@ -207,6 +207,7 @@ class LeggedRobotCfg(BaseConfig):
         resampling_time = 6. # time before command are changed[s]
         heading_command = False # use command to calculate target yaw
         
+        stop_command_prob = 0.0
         lin_vel_clip = 0.2
         ang_vel_clip = 0.4
         # Easy ranges
