@@ -1308,7 +1308,11 @@ class LeggedRobot(BaseTask):
         norm = torch.norm(self.target_pos_rel, dim=-1, keepdim=True)
         target_vec_norm = self.target_pos_rel / (norm + 1e-5)
         cur_vel = self.root_states[:, 7:9]
-        rew = torch.minimum(torch.sum(target_vec_norm * cur_vel, dim=-1), self.commands[:, 0]) / (self.commands[:, 0] + 1e-5)
+        cmd_x = self.commands[:, 0]
+        rew = torch.zeros_like(cmd_x)
+        move_mask = torch.abs(cmd_x) > self.cfg.commands.lin_vel_clip
+        projected_vel = torch.sum(target_vec_norm * cur_vel, dim=-1)
+        rew[move_mask] = torch.minimum(projected_vel[move_mask], cmd_x[move_mask]) / (cmd_x[move_mask] + 1e-5)
         return rew
         
     def _reward_tracking_lin_vel_x(self):
