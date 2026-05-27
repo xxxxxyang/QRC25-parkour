@@ -6,3 +6,4 @@ onboard/a1
 onboard/Deploy-Go1.md
 *.sh
 tmp/
+__pycache__/
