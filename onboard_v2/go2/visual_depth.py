@@ -182,6 +182,9 @@ class DepthPublisherNode(Node):
                 f"shape={tuple(depth.shape)}, "
                 f"range=({float(depth.min()):.4f}, {float(depth.max()):.4f})"
             )
+            self.get_logger().info(
+                "visual_depth is ready."
+            )
             self._first_depth_published = True
 
 
