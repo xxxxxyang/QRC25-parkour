@@ -42,6 +42,7 @@ class Go2DepthPolicyNode(Go2Ros2Real):
         self.policy_model = None
         self._first_depth_received = False
         self._first_action_sent = False
+        self._last_keys = None
 
         self.depth_sub = self.create_subscription(
             Float32MultiArray,
@@ -81,14 +82,32 @@ class Go2DepthPolicyNode(Go2Ros2Real):
         self.main_loop_timer = self.create_timer(duration, self.main_loop)
 
     def main_loop(self):
+        keys = self.joy_stick_buffer.keys
+        if self._last_keys != keys:
+            self.get_logger().info(
+                "Wireless keys changed: "
+                f"keys={keys}, lx={self.joy_stick_buffer.lx:.3f}, "
+                f"ly={self.joy_stick_buffer.ly:.3f}, "
+                f"rx={self.joy_stick_buffer.rx:.3f}, "
+                f"command={tuple(float(x) for x in self.xyyaw_command.detach().cpu())}"
+            )
+            self._last_keys = keys
+
         if self.use_sport_mode:
             if self.joy_stick_buffer.keys & self.WirelessButtons.R1:
+                self.get_logger().info("R1 pressed: request sport STANDUP", once=True)
                 self._sport_mode_change(ROBOT_SPORT_API_ID_STANDUP)
             if self.joy_stick_buffer.keys & self.WirelessButtons.R2:
+                self.get_logger().info("R2 pressed: request sport STANDDOWN", once=True)
                 self._sport_mode_change(ROBOT_SPORT_API_ID_STANDDOWN)
             if self.joy_stick_buffer.keys & self.WirelessButtons.X:
+                self.get_logger().info("X pressed: request sport BALANCESTAND", once=True)
                 self._sport_mode_change(ROBOT_SPORT_API_ID_BALANCESTAND)
             if self.joy_stick_buffer.keys & self.WirelessButtons.L1:
+                self.get_logger().info(
+                    "L1 pressed: disable sport service and enter policy. "
+                    f"command={tuple(float(x) for x in self.xyyaw_command.detach().cpu())}"
+                )
                 self.use_sport_mode = False
                 self._sport_state_change(0)
                 self.use_parkour_policy = True
@@ -116,7 +135,8 @@ class Go2DepthPolicyNode(Go2Ros2Real):
                 t_send = time.monotonic()
                 if not self._first_action_sent:
                     self.get_logger().info(
-                        "First dryrun action published: "
+                        "First policy action published: "
+                        f"dryrun={self.dryrun}, topic={self.low_cmd_topic}, "
                         f"shape={tuple(action.shape)}, "
                         f"range=({float(action.min().item()):.4f}, {float(action.max().item()):.4f})"
                     )
@@ -148,11 +168,13 @@ class Go2DepthPolicyNode(Go2Ros2Real):
                 )
 
             if self.joy_stick_buffer.keys & self.WirelessButtons.L2:
+                self.get_logger().info("L2 pressed: exit policy and request sport mode")
                 self.use_parkour_policy = False
                 self.use_sport_mode = True
                 self._sport_state_change(0)
 
             if self.joy_stick_buffer.keys & self.WirelessButtons.Y:
+                self.get_logger().info("Y pressed: reset policy state")
                 self.reset_policy_state()
 
             self.global_counter += 1
