@@ -40,6 +40,8 @@ class Go2DepthPolicyNode(Go2Ros2Real):
         self.visual_update_interval = self.cfg["depth"].get("update_interval", 5)
         self.depth_image_buffer = None
         self.policy_model = None
+        self._first_depth_received = False
+        self._first_action_sent = False
 
         self.depth_sub = self.create_subscription(
             Float32MultiArray,
@@ -52,6 +54,13 @@ class Go2DepthPolicyNode(Go2Ros2Real):
         resolution = self.cfg["depth"].get("resized", [87, 58])
         depth = torch.tensor(msg.data, dtype=torch.float32, device=self.model_device)
         self.depth_image_buffer = depth.view(1, resolution[1], resolution[0])
+        if not self._first_depth_received:
+            self.get_logger().info(
+                "First depth frame received: "
+                f"shape={tuple(self.depth_image_buffer.shape)}, "
+                f"finite={bool(torch.isfinite(self.depth_image_buffer).all())}"
+            )
+            self._first_depth_received = True
 
     def attach_policy(self, policy_model):
         self.policy_model = policy_model
@@ -105,6 +114,13 @@ class Go2DepthPolicyNode(Go2Ros2Real):
                 t_policy = time.monotonic()
                 self.send_action(action)
                 t_send = time.monotonic()
+                if not self._first_action_sent:
+                    self.get_logger().info(
+                        "First dryrun action published: "
+                        f"shape={tuple(action.shape)}, "
+                        f"range=({float(action.min().item()):.4f}, {float(action.max().item()):.4f})"
+                    )
+                    self._first_action_sent = True
 
                 self._debug_log(
                     "step={step} update_depth={update_depth} "
@@ -200,6 +216,11 @@ def main():
     node.attach_policy(policy)
     node.attach_debug_logger(debug_logger)
     node.get_logger().info(f"Loaded policy from {checkpoint_path}")
+    node.get_logger().info(
+        "Depth policy node ready: "
+        f"device={device}, dryrun={not args.nodryrun}, "
+        f"depth_topic=/forward_depth_image, lowcmd_topic={node.low_cmd_topic}"
+    )
     node.start_ros_handlers()
     node.start_main_loop_timer(cfg["sim"]["dt"] * cfg["control"]["decimation"])
     rclpy.spin(node)

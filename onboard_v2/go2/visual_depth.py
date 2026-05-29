@@ -59,6 +59,7 @@ class DepthPublisherNode(Node):
         self.enable_rgb = enable_rgb
         self.forward_depth_topic = forward_depth_topic
         self.debug = debug
+        self._first_depth_published = False
 
         self.original_resolution = self.cfg["depth"].get("original", (106, 60))
         self.output_resolution = self.cfg["depth"].get("resized", (87, 58))
@@ -98,6 +99,10 @@ class DepthPublisherNode(Node):
         self.rs_temporal_filter.set_option(rs.option.filter_smooth_alpha, 0.75)
         self.rs_temporal_filter.set_option(rs.option.filter_smooth_delta, 1)
         self.rs_hole_filling_filter = rs.hole_filling_filter()
+        self.get_logger().info(
+            "RealSense depth pipeline started: "
+            f"{self.rs_resolution[0]}x{self.rs_resolution[1]} @ {self.rs_fps}Hz"
+        )
 
     def _start_ros_handlers(self):
         self.depth_input_pub = self.create_publisher(Image, self.depth_input_topic, 1)
@@ -108,6 +113,11 @@ class DepthPublisherNode(Node):
             )
         self.forward_depth_image_pub = self.create_publisher(
             Float32MultiArray, self.forward_depth_topic, 1
+        )
+        self.get_logger().info(
+            "Depth publishers ready: "
+            f"{self.forward_depth_topic} -> Float32MultiArray, "
+            f"{self.depth_input_topic} -> Image"
         )
 
     def _get_frame(self):
@@ -166,6 +176,13 @@ class DepthPublisherNode(Node):
         msg = Float32MultiArray()
         msg.data = depth.flatten().detach().cpu().numpy().tolist()
         self.forward_depth_image_pub.publish(msg)
+        if not self._first_depth_published:
+            self.get_logger().info(
+                "First depth frame published: "
+                f"shape={tuple(depth.shape)}, "
+                f"range=({float(depth.min()):.4f}, {float(depth.max()):.4f})"
+            )
+            self._first_depth_published = True
 
 
 def main():
@@ -193,6 +210,10 @@ def main():
         rs_fps=args.fps,
         enable_rgb=args.enable_rgb,
         debug=args.debug,
+    )
+    node.get_logger().info(
+        "visual_depth is running; press Ctrl-C to stop. "
+        f"publish_period={cfg['depth'].get('update_interval', 5) * cfg['control']['decimation'] * cfg['sim']['dt']:.3f}s"
     )
 
     try:
