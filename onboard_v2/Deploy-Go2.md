@@ -26,7 +26,9 @@ Compared with the original `onboard` folder, this version uses:
 
 4. Install PyTorch for the Jetson platform.
 
-   Use the appropriate aarch64 wheel for your device.
+    ```bash
+    pip install torch-1.10.0-cp36-cp36m-linux_aarch64.whl
+    ```
 
 5. Install `ros2_numpy`.
 

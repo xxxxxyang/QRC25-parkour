@@ -26,7 +26,9 @@
 
 4. 安装适用于 Jetson 平台的 PyTorch。
 
-   请根据设备选择对应的 aarch64 wheel。
+   ```bash
+   pip install torch-1.10.0-cp36-cp36m-linux_aarch64.whl
+   ```
 
 5. 安装 `ros2_numpy`。
 
