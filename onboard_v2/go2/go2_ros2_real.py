@@ -1,4 +1,7 @@
+import ctypes
 import os, sys
+import platform
+import struct
 
 import rclpy
 from rclpy.node import Node
@@ -22,7 +25,112 @@ elif os.uname().machine == "aarch64":
         os.path.dirname(os.path.abspath(__file__)),
         "aarch64",
     ))
-from crc_module import get_crc
+
+try:
+    from crc_module import get_crc
+except ImportError:
+    _LOW_CMD_PACK_FMT = '<4B4IH2x' + 'B3x5f3I' * 20 + '4B' + '55Bx2I'
+    _CRC_LIB = None
+
+    def _crc_words(pack_data):
+        calc_len = (len(pack_data) >> 2) - 1
+        return [
+            (
+                (pack_data[i * 4 + 3] << 24)
+                | (pack_data[i * 4 + 2] << 16)
+                | (pack_data[i * 4 + 1] << 8)
+                | pack_data[i * 4]
+            )
+            for i in range(calc_len)
+        ]
+
+    def _load_crc_lib():
+        global _CRC_LIB
+        if _CRC_LIB is not None:
+            return _CRC_LIB
+
+        machine = platform.machine()
+        lib_name = "crc_aarch64.so" if machine == "aarch64" else "crc_amd64.so"
+        candidates = [
+            os.path.join(
+                os.path.expanduser("~"),
+                "unitree_sdk2_python",
+                "unitree_sdk2py",
+                "utils",
+                "lib",
+                lib_name,
+            )
+        ]
+        try:
+            import unitree_sdk2py.utils as unitree_utils
+            candidates.append(
+                os.path.join(os.path.dirname(unitree_utils.__file__), "lib", lib_name)
+            )
+        except ImportError:
+            pass
+
+        for path in candidates:
+            if os.path.exists(path):
+                _CRC_LIB = ctypes.CDLL(path)
+                _CRC_LIB.crc32_core.argtypes = (
+                    ctypes.POINTER(ctypes.c_uint32),
+                    ctypes.c_uint32,
+                )
+                _CRC_LIB.crc32_core.restype = ctypes.c_uint32
+                return _CRC_LIB
+        return None
+
+    def _crc32_python(words):
+        crc = 0xFFFFFFFF
+        polynomial = 0x04C11DB7
+        for current in words:
+            bit = 1 << 31
+            for _ in range(32):
+                if crc & 0x80000000:
+                    crc = ((crc << 1) & 0xFFFFFFFF) ^ polynomial
+                else:
+                    crc = (crc << 1) & 0xFFFFFFFF
+                if current & bit:
+                    crc ^= polynomial
+                bit >>= 1
+        return crc
+
+    def _crc32(words):
+        crc_lib = _load_crc_lib()
+        if crc_lib is None:
+            return _crc32_python(words)
+        array_type = ctypes.c_uint32 * len(words)
+        return crc_lib.crc32_core(array_type(*words), len(words))
+
+    def get_crc(cmd):
+        data = []
+        data.extend(cmd.head)
+        data.append(cmd.level_flag)
+        data.append(cmd.frame_reserve)
+        data.extend(cmd.sn)
+        data.extend(cmd.version)
+        data.append(cmd.bandwidth)
+
+        for i in range(20):
+            motor_cmd = cmd.motor_cmd[i]
+            data.append(motor_cmd.mode)
+            data.append(motor_cmd.q)
+            data.append(motor_cmd.dq)
+            data.append(motor_cmd.tau)
+            data.append(motor_cmd.kp)
+            data.append(motor_cmd.kd)
+            data.extend(motor_cmd.reserve)
+
+        data.append(cmd.bms_cmd.off)
+        data.extend(cmd.bms_cmd.reserve)
+        data.extend(cmd.wireless_remote)
+        data.extend(cmd.led)
+        data.extend(cmd.fan)
+        data.append(cmd.gpio)
+        data.append(cmd.reserve)
+        data.append(cmd.crc)
+
+        return _crc32(_crc_words(struct.pack(_LOW_CMD_PACK_FMT, *data)))
 
 from multiprocessing import Process
 from collections import OrderedDict
