@@ -6,7 +6,6 @@ from collections import OrderedDict
 
 import numpy as np
 import pyrealsense2 as rs
-import ros2_numpy as rnp
 import torch
 import torchvision.transforms.functional as TF
 from torchvision.transforms import InterpolationMode
@@ -21,6 +20,18 @@ import rclpy
 def resize2d(img, resized_wh):
     resized_hw = (resized_wh[1], resized_wh[0])
     return TF.resize(img, resized_hw, interpolation=InterpolationMode.BICUBIC)
+
+
+def image_msg_from_numpy(array, encoding):
+    array = np.ascontiguousarray(array)
+    msg = Image()
+    msg.height = int(array.shape[0])
+    msg.width = int(array.shape[1])
+    msg.encoding = encoding
+    msg.is_bigendian = 0
+    msg.step = int(array.strides[0])
+    msg.data = array.tobytes()
+    return msg
 
 
 class DepthPublisherNode(Node):
@@ -116,7 +127,7 @@ class DepthPublisherNode(Node):
             if color_frame:
                 rgb_image_np = np.asanyarray(color_frame.get_data())
                 rgb_image_np = rgb_image_np[top:h_end, left:w_end]
-                rgb_image_msg = rnp.msgify(Image, rgb_image_np, encoding="rgb8")
+                rgb_image_msg = image_msg_from_numpy(rgb_image_np, encoding="rgb8")
                 rgb_image_msg.header.stamp = self.get_clock().now().to_msg()
                 rgb_image_msg.header.frame_id = "d435_sim_depth_link"
                 self.rgb_pub.publish(rgb_image_msg)
@@ -141,7 +152,7 @@ class DepthPublisherNode(Node):
             depth_input_data = depth_input_data.copy()
             depth_input_data[int(depth_input_data.shape[0] / 2), :] = 0
             depth_input_data[:, int(depth_input_data.shape[1] / 2)] = 0
-        depth_input_msg = rnp.msgify(Image, depth_input_data, encoding="16UC1")
+        depth_input_msg = image_msg_from_numpy(depth_input_data, encoding="16UC1")
         depth_input_msg.header.stamp = self.get_clock().now().to_msg()
         depth_input_msg.header.frame_id = "d435_sim_depth_link"
         self.depth_input_pub.publish(depth_input_msg)
