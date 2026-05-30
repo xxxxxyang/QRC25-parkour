@@ -88,7 +88,7 @@ class ExportedHardwareVisionPolicy(nn.Module):
             self._last_depth_latent_yaw = self.depth_encoder(depth_image, obs_prop_depth)
 
         depth_latent = self._last_depth_latent_yaw[:, :-2]
-        yaw = self._last_depth_latent_yaw[:, -2:] * 1.5
+        self.last_predicted_yaw = self._last_depth_latent_yaw[:, -2:] * 1.5
 
         base_obs = torch.zeros(
             proprio.shape[0],
@@ -97,7 +97,6 @@ class ExportedHardwareVisionPolicy(nn.Module):
             dtype=proprio.dtype,
         )
         actor_proprio = proprio.clone()
-        actor_proprio[:, 6:8] = yaw
         base_obs[:, :self.n_proprio] = actor_proprio
         history_start = self.n_proprio + self.n_scan + self.n_priv + self.n_priv_latent
         base_obs[:, history_start:] = proprio_history.reshape(proprio.shape[0], -1)

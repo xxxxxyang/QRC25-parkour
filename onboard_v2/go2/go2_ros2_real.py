@@ -715,13 +715,15 @@ class Go2Ros2Real(Node):
                         dof_pos, dof_vel,
                         last_actions, 
                         contact], dim=-1)
+        history_proprio = proprio.clone()
+        history_proprio[:, 6:8] = 0.
 
         self.proprio_history_buf = torch.where(
             (self.episode_length_buf <= 1)[:, None, None], 
-            torch.stack([proprio] * self.n_hist_len, dim=1),
+            torch.stack([history_proprio] * self.n_hist_len, dim=1),
             torch.cat([
                 self.proprio_history_buf[:, 1:],
-                proprio.unsqueeze(1)
+                history_proprio.unsqueeze(1)
             ], dim=1)
         )
         end_time = time.monotonic()
