@@ -90,6 +90,8 @@ class Go2DepthPolicyNode(Go2Ros2Real):
         self.episode_length_buf.zero_()
         self.target_q_clip_count = 0
         self._first_action_sent = False
+        if hasattr(self, "low_state_buffer"):
+            self.reset_heading_target()
 
     def start_main_loop_timer(self, duration):
         self.main_loop_timer = self.create_timer(duration, self.main_loop)
@@ -188,7 +190,7 @@ class Go2DepthPolicyNode(Go2Ros2Real):
                     "policy_ms={policy_ms:.3f} send_ms={send_ms:.3f} "
                     "action_min={action_min:.4f} action_max={action_max:.4f} "
                     "depth_shape={depth_shape} depth_finite={depth_finite} "
-                    "command={command} rpy={rpy} dof_pos={dof_pos} "
+                    "command={command} yaw_info={yaw_info} rpy={rpy} dof_pos={dof_pos} "
                     "action={action} clipped_action={clipped_action} "
                     "target_q={target_q} target_q_clip_mask={target_q_clip_mask} "
                     "loop_ms={loop_ms:.3f}".format(
@@ -203,6 +205,7 @@ class Go2DepthPolicyNode(Go2Ros2Real):
                         depth_shape=tuple(self.depth_image_buffer.shape),
                         depth_finite=bool(torch.isfinite(self.depth_image_buffer).all()),
                         command=self._format_tensor(self.xyyaw_command),
+                        yaw_info=self._format_tensor(self.last_yaw_info),
                         rpy=self._format_tensor(torch.tensor(
                             self.low_state_buffer.imu_state.rpy,
                             device=self.model_device,

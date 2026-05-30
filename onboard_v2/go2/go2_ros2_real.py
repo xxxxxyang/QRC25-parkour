@@ -292,10 +292,13 @@ class Go2Ros2Real(Node):
         self.proprio_history_buf = torch.zeros(1, self.n_hist_len, self.n_proprio, device=self.model_device, dtype=torch.float)
         self.episode_length_buf = torch.zeros(1, device=self.model_device, dtype=torch.float)
         self.forward_depth_latent_yaw_buffer = torch.zeros(1, self.n_depth_latent+2, device=self.model_device, dtype=torch.float)
-        self.xyyaw_command = torch.tensor([[0, 0, 0]], device= self.model_device, dtype= torch.float32)
+        self.xyyaw_command = torch.tensor([0, 0, 0], device= self.model_device, dtype= torch.float32)
         self.contact_filt = torch.ones((1, 4), device= self.model_device, dtype= torch.float32)
         self.last_contact_filt = torch.ones((1, 4), device= self.model_device, dtype= torch.float32)
         self.target_q_clip_count = 0
+        self.target_yaw = torch.tensor(0.0, device=self.model_device, dtype=torch.float32)
+        self.next_target_yaw = torch.tensor(0.0, device=self.model_device, dtype=torch.float32)
+        self._last_yaw_update_time = time.monotonic()
 
         self.init_stand_config()
 
@@ -329,9 +332,12 @@ class Go2Ros2Real(Node):
         self.proprio_history_buf = torch.zeros(1, self.n_hist_len, self.n_proprio, device=self.model_device, dtype=torch.float)
         self.episode_length_buf = torch.zeros(1, device=self.model_device, dtype=torch.float)
         self.forward_depth_latent_yaw_buffer = torch.zeros(1, self.n_depth_latent+2, device=self.model_device, dtype=torch.float)
-        self.xyyaw_command = torch.tensor([[0, 0, 0]], device= self.model_device, dtype= torch.float32)
+        self.xyyaw_command = torch.tensor([0, 0, 0], device= self.model_device, dtype= torch.float32)
         self.contact_filt = torch.ones((1, 4), device= self.model_device, dtype= torch.float32)
         self.last_contact_filt = torch.ones((1, 4), device= self.model_device, dtype= torch.float32)
+        self.target_yaw = torch.tensor(0.0, device=self.model_device, dtype=torch.float32)
+        self.next_target_yaw = torch.tensor(0.0, device=self.model_device, dtype=torch.float32)
+        self._last_yaw_update_time = time.monotonic()
 
 
     def parse_config(self):
@@ -597,10 +603,43 @@ class Go2Ros2Real(Node):
         imu_obs = torch.tensor([[roll, pitch]], device= self.model_device, dtype= torch.float32)
         return imu_obs
 
+    def _get_yaw_obs(self):
+        quat_xyzw = torch.tensor([
+            self.low_state_buffer.imu_state.quaternion[1],
+            self.low_state_buffer.imu_state.quaternion[2],
+            self.low_state_buffer.imu_state.quaternion[3],
+            self.low_state_buffer.imu_state.quaternion[0],
+            ], device= self.model_device, dtype= torch.float32).unsqueeze(0)
+        _, _, yaw = get_euler_xyz(quat_xyzw)
+        return yaw[0]
+
+    @staticmethod
+    def _wrap_to_pi(angle):
+        return torch.atan2(torch.sin(angle), torch.cos(angle))
+
+    def reset_heading_target(self):
+        yaw = self._get_yaw_obs().detach()
+        self.target_yaw = yaw.clone()
+        self.next_target_yaw = yaw.clone()
+        self._last_yaw_update_time = time.monotonic()
+
+    def _update_heading_target(self):
+        now = time.monotonic()
+        dt = max(0.0, min(now - self._last_yaw_update_time, 0.1))
+        self._last_yaw_update_time = now
+        yaw_rate_command = self.xyyaw_command.reshape(-1)[2]
+        self.target_yaw = self._wrap_to_pi(self.target_yaw + yaw_rate_command * dt)
+        self.next_target_yaw = self.target_yaw
+
     def _get_delta_yaw_obs(self):
-        yaw = 0
-        delta_yaw, delta_next_yaw = 0, 0
-        yaw_info = torch.tensor([[0, delta_yaw, delta_next_yaw]], device= self.model_device, dtype= torch.float32)
+        yaw = self._get_yaw_obs()
+        delta_yaw = self._wrap_to_pi(self.target_yaw - yaw)
+        delta_next_yaw = self._wrap_to_pi(self.next_target_yaw - yaw)
+        yaw_info = torch.stack([
+            torch.zeros_like(delta_yaw),
+            delta_yaw,
+            delta_next_yaw,
+        ]).view(1, 3)
         return yaw_info
 
     def _get_commands_obs(self):
@@ -645,7 +684,9 @@ class Go2Ros2Real(Node):
         imu = self._get_imu_obs()  # (1, 2)
         imu_time = time.monotonic()
 
+        self._update_heading_target()
         yaw_info = self._get_delta_yaw_obs()  # (1, 3)
+        self.last_yaw_info = yaw_info.detach().clone()
         yaw_time = time.monotonic()
 
         xyyaw_commands = self._get_commands_obs()  # (1, 3)
