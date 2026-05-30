@@ -32,6 +32,8 @@ class Go2DepthPolicyNode(Go2Ros2Real):
     def __init__(self, *args, **kwargs):
         self.debug = bool(kwargs.pop("debug", False))
         self.debug_logger = kwargs.pop("debug_logger", None)
+        self.lock_policy_command = bool(kwargs.pop("lock_policy_command", False))
+        self.max_policy_steps = int(kwargs.pop("max_policy_steps", 0))
         kwargs.setdefault("depth_data_topic", None)
         super().__init__(*args, robot_class_name="Go2", **kwargs)
         self.use_sport_mode = True
@@ -141,6 +143,19 @@ class Go2DepthPolicyNode(Go2Ros2Real):
                 self._previous_keys = keys
                 return
 
+            if self.max_policy_steps > 0 and self.global_counter >= self.max_policy_steps:
+                self.get_logger().info(
+                    f"Max policy steps reached ({self.max_policy_steps}); exit policy and request sport mode"
+                )
+                self.use_parkour_policy = False
+                self.use_sport_mode = True
+                self._sport_state_change(1)
+                self._previous_keys = keys
+                return
+
+            if self.lock_policy_command:
+                self.xyyaw_command = torch.zeros(3, device=self.model_device, dtype=torch.float32)
+
             loop_start = time.monotonic()
             proprio = self.get_proprio()
             t_proprio = time.monotonic()
@@ -232,6 +247,18 @@ def main():
         default=None,
         help="Debug log file path when --debug-output=file.",
     )
+    parser.add_argument(
+        "--lock-policy-command",
+        action="store_true",
+        default=False,
+        help="Force x/y/yaw command to zero while policy is active.",
+    )
+    parser.add_argument(
+        "--max-policy-steps",
+        type=int,
+        default=0,
+        help="Automatically exit policy after this many control steps. 0 disables the limit.",
+    )
     args = parser.parse_args()
 
     with open(osp.join(args.logdir, "config.json"), "r") as f:
@@ -254,7 +281,7 @@ def main():
                 else Path(args.logdir) / "run_depth_policy.debug.log"
             )
             debug_log_path.parent.mkdir(parents=True, exist_ok=True)
-            handler = logging.FileHandler(debug_log_path, mode="a")
+            handler = logging.FileHandler(debug_log_path, mode="w")
         else:
             handler = logging.StreamHandler()
         handler.setFormatter(formatter)
@@ -267,6 +294,8 @@ def main():
         dryrun=not args.nodryrun,
         debug=args.debug,
         debug_logger=debug_logger,
+        lock_policy_command=args.lock_policy_command,
+        max_policy_steps=args.max_policy_steps,
     )
     policy, checkpoint_path = load_hardware_vision_policy(args.logdir, cfg, device)
     node.attach_policy(policy)
@@ -275,6 +304,8 @@ def main():
     node.get_logger().info(
         "Depth policy node ready: "
         f"device={device}, dryrun={not args.nodryrun}, "
+        f"lock_policy_command={args.lock_policy_command}, "
+        f"max_policy_steps={args.max_policy_steps}, "
         f"depth_topic=/forward_depth_image, lowcmd_topic={node.low_cmd_topic}"
     )
     node.start_ros_handlers()
