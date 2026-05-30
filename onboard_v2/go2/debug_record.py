@@ -98,7 +98,7 @@ class ParkourDebugRecorder(Node):
         if self.lowcmd_topic:
             self.attach_lowcmd_topic(self.lowcmd_topic)
         else:
-            self.get_logger().info("Waiting for /lowcmd_dryrun_* topic.")
+            self.get_logger().info("Waiting for /lowcmd or /lowcmd_dryrun_* topic.")
 
     def stamp(self):
         return time.time()
@@ -119,7 +119,7 @@ class ParkourDebugRecorder(Node):
         if self.lowcmd_sub is not None:
             return
         for topic, types in self.get_topic_names_and_types():
-            if topic.startswith("/lowcmd_dryrun_"):
+            if topic == "/lowcmd" or topic.startswith("/lowcmd_dryrun_"):
                 self.attach_lowcmd_topic(topic)
                 return
 
