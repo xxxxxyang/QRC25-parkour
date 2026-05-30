@@ -295,6 +295,7 @@ class Go2Ros2Real(Node):
         self.xyyaw_command = torch.tensor([[0, 0, 0]], device= self.model_device, dtype= torch.float32)
         self.contact_filt = torch.ones((1, 4), device= self.model_device, dtype= torch.float32)
         self.last_contact_filt = torch.ones((1, 4), device= self.model_device, dtype= torch.float32)
+        self.target_q_clip_count = 0
 
         self.init_stand_config()
 
@@ -705,15 +706,57 @@ class Go2Ros2Real(Node):
         Thus, the actions has the batch dimension, whose size is 1.
         """
         if isinstance(actions, list):
-            actions = torch.tensor(actions, device=self.model_device).unsqueeze(0)
+            actions = torch.tensor(actions, device=self.model_device, dtype=torch.float32)
+        if actions.dim() == 1:
+            actions = actions.unsqueeze(0)
         
         self.actions = actions
 
         hard_clip = self.cfg["normalization"]["clip_actions"]/self.cfg["control"]["action_scale"]
-        clipped_scaled_action = torch.clip(actions, -hard_clip, hard_clip) * self.cfg["control"]["action_scale"]
-        
-        robot_coordinates_action = clipped_scaled_action + self.default_dof_pos.unsqueeze(0)
+        clipped_action = torch.clip(actions, -hard_clip, hard_clip)
+        clipped_scaled_action = clipped_action * self.cfg["control"]["action_scale"]
+        unclipped_target_q = clipped_scaled_action + self.default_dof_pos.unsqueeze(0)
+        robot_coordinates_action = torch.clip(
+            unclipped_target_q,
+            self.joint_limits_low.unsqueeze(0),
+            self.joint_limits_high.unsqueeze(0),
+        )
+        target_q_clip_mask = robot_coordinates_action != unclipped_target_q
+
+        self.last_clipped_action = clipped_action.detach().clone()
+        self.last_unclipped_target_q = unclipped_target_q.detach().clone()
+        self.last_target_q = robot_coordinates_action.detach().clone()
+        self.last_target_q_clip_mask = target_q_clip_mask.detach().clone()
+        if bool(target_q_clip_mask.any()):
+            self.target_q_clip_count += 1
+            if self.target_q_clip_count == 1 or self.target_q_clip_count % 50 == 0:
+                clipped_joints = torch.nonzero(target_q_clip_mask[0], as_tuple=False).flatten().tolist()
+                self.get_logger().warn(
+                    "Clipped policy target q to hardware joint limits: "
+                    f"count={self.target_q_clip_count}, joints={clipped_joints}"
+                )
+
         self._publish_legs_cmd(robot_coordinates_action[0], stand=False)
+        return robot_coordinates_action
+
+    def smooth_policy_takeover(self, duration=1.0, publish_interval=0.02):
+        """Continuously publish a smooth transition before policy inference starts."""
+        start_q = self.dof_pos_[0].detach().clone()
+        target_q = self.default_dof_pos.detach().clone()
+        steps = max(1, int(duration / publish_interval))
+        self.get_logger().info(
+            "Starting smooth policy takeover: "
+            f"duration={duration:.2f}s, publish_rate={1.0 / publish_interval:.1f}Hz"
+        )
+        for step in range(steps + 1):
+            alpha = step / steps
+            transition_q = start_q + alpha * (target_q - start_q)
+            transition_q = torch.clip(transition_q, self.joint_limits_low, self.joint_limits_high)
+            self._publish_legs_cmd(transition_q, stand=False)
+            if step < steps:
+                time.sleep(publish_interval)
+        self.actions = torch.zeros(self.NUM_ACTIONS, device=self.model_device, dtype=torch.float32)
+        self.get_logger().info("Smooth policy takeover complete.")
 
     def send_stand_action(self, actions):
         """ Send the action to the robot motors, which does the preprocessing

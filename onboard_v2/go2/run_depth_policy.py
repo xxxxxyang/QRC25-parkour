@@ -74,10 +74,20 @@ class Go2DepthPolicyNode(Go2Ros2Real):
         if self.debug and self.debug_logger is not None:
             self.debug_logger.info(message)
 
+    @staticmethod
+    def _format_tensor(tensor):
+        values = tensor.detach().reshape(-1).cpu().tolist()
+        return "[" + ",".join(f"{float(value):.5f}" for value in values) + "]"
+
     def reset_policy_state(self):
         if self.policy_model is not None:
             self.policy_model.reset()
         self.global_counter = 0
+        self.actions = torch.zeros(self.num_actions, device=self.model_device, dtype=torch.float32)
+        self.proprio_history_buf.zero_()
+        self.episode_length_buf.zero_()
+        self.target_q_clip_count = 0
+        self._first_action_sent = False
 
     def start_main_loop_timer(self, duration):
         self.main_loop_timer = self.create_timer(duration, self.main_loop)
@@ -106,18 +116,31 @@ class Go2DepthPolicyNode(Go2Ros2Real):
                 self.get_logger().info("X pressed: request sport BALANCESTAND")
                 self._sport_mode_change(ROBOT_SPORT_API_ID_BALANCESTAND)
             if pressed & self.WirelessButtons.L1:
-                self.get_logger().info(
-                    "L1 pressed: disable sport service and enter policy. "
-                    f"command={tuple(float(x) for x in self.xyyaw_command.detach().cpu())}"
-                )
-                self.use_sport_mode = False
-                self._sport_state_change(0)
-                self.use_parkour_policy = True
-                self.reset_policy_state()
-                self.send_action(torch.zeros(self.num_actions, device=self.model_device))
-                time.sleep(1.0)
+                if self.depth_image_buffer is None or not bool(torch.isfinite(self.depth_image_buffer).all()):
+                    self.get_logger().warn(
+                        "L1 pressed but policy takeover was rejected: "
+                        "no valid depth frame has been received."
+                    )
+                else:
+                    self.get_logger().info(
+                        "L1 pressed: disable sport service and enter policy. "
+                        f"command={tuple(float(x) for x in self.xyyaw_command.detach().cpu())}"
+                    )
+                    self.use_sport_mode = False
+                    self._sport_state_change(0)
+                    self.reset_policy_state()
+                    self.smooth_policy_takeover()
+                    self.use_parkour_policy = True
 
         if self.use_parkour_policy:
+            if pressed & self.WirelessButtons.L2:
+                self.get_logger().info("L2 pressed: exit policy and request sport mode")
+                self.use_parkour_policy = False
+                self.use_sport_mode = True
+                self._sport_state_change(1)
+                self._previous_keys = keys
+                return
+
             loop_start = time.monotonic()
             proprio = self.get_proprio()
             t_proprio = time.monotonic()
@@ -133,7 +156,7 @@ class Go2DepthPolicyNode(Go2Ros2Real):
                     update_depth=update_depth,
                 )
                 t_policy = time.monotonic()
-                self.send_action(action)
+                target_q = self.send_action(action)
                 t_send = time.monotonic()
                 if not self._first_action_sent:
                     self.get_logger().info(
@@ -150,6 +173,9 @@ class Go2DepthPolicyNode(Go2Ros2Real):
                     "policy_ms={policy_ms:.3f} send_ms={send_ms:.3f} "
                     "action_min={action_min:.4f} action_max={action_max:.4f} "
                     "depth_shape={depth_shape} depth_finite={depth_finite} "
+                    "command={command} rpy={rpy} dof_pos={dof_pos} "
+                    "action={action} clipped_action={clipped_action} "
+                    "target_q={target_q} target_q_clip_mask={target_q_clip_mask} "
                     "loop_ms={loop_ms:.3f}".format(
                         step=self.global_counter,
                         update_depth=int(update_depth),
@@ -161,6 +187,17 @@ class Go2DepthPolicyNode(Go2Ros2Real):
                         action_max=float(action.max().item()),
                         depth_shape=tuple(self.depth_image_buffer.shape),
                         depth_finite=bool(torch.isfinite(self.depth_image_buffer).all()),
+                        command=self._format_tensor(self.xyyaw_command),
+                        rpy=self._format_tensor(torch.tensor(
+                            self.low_state_buffer.imu_state.rpy,
+                            device=self.model_device,
+                            dtype=torch.float32,
+                        )),
+                        dof_pos=self._format_tensor(self.dof_pos_),
+                        action=self._format_tensor(action),
+                        clipped_action=self._format_tensor(self.last_clipped_action),
+                        target_q=self._format_tensor(target_q),
+                        target_q_clip_mask=self._format_tensor(self.last_target_q_clip_mask),
                         loop_ms=(t_send - loop_start) * 1000.0,
                     )
                 )
@@ -168,12 +205,6 @@ class Go2DepthPolicyNode(Go2Ros2Real):
                 self._debug_log(
                     f"step={self.global_counter} update_depth={int(update_depth)} depth_buffer=missing"
                 )
-
-            if pressed & self.WirelessButtons.L2:
-                self.get_logger().info("L2 pressed: exit policy and request sport mode")
-                self.use_parkour_policy = False
-                self.use_sport_mode = True
-                self._sport_state_change(1)
 
             if pressed & self.WirelessButtons.Y:
                 self.get_logger().info("Y pressed: reset policy state")
